@@ -15,35 +15,62 @@ library(tidyverse)
 library(tmap)
 library(leaflet)
 library(sf)
+library(lubridate)
 ```
 
 ```{r}
+# Loading Central Business District Shape
+cbd_geofence <- read.csv("MTA_Central_Business_District_Geofence__Beginning_June_2024_20250605.csv", stringsAsFactors = FALSE)
+cbd_geofence <- st_as_sfc(cbd_geofence$polygon, crs = 2263)
+
 # Loading collisions data
 filter <- c(0, NA)
 
-data <- read.csv("Motor_Vehicle_Collisions_-_Crashes_20250605.csv") %>%
+crashes <- read.csv("Motor_Vehicle_Collisions_-_Crashes_20250605.csv") %>%
+  select(CRASH.DATE,
+         CRASH.TIME,
+         BOROUGH,
+         LATITUDE,
+         LONGITUDE,
+         NUMBER.OF.PERSONS.INJURED,
+         NUMBER.OF.PERSONS.KILLED) %>%
   filter(! LATITUDE %in% filter,
-         ! LONGITUDE %in% filter) # %>%
-  # st_as_sf(coords=c("LONGITUDE", "LATITUDE"), crs = 2263)
+         ! LONGITUDE %in% filter) %>%
+  rename(
+    "date" = "CRASH.DATE",
+    "time" = "CRASH.TIME",
+    "borough" = "BOROUGH",
+    "lat" = "LATITUDE",
+    "long" = "LONGITUDE",
+    "persons_inj" = "NUMBER.OF.PERSONS.INJURED",
+    "persons_death" = "NUMBER.OF.PERSONS.KILLED"
+  ) %>%
+  mutate(
+    date = mdy(date),
+    time = hm(time)
+    #after_cp = ,
+    #cp_zone = 
+  )
 
-head(data)
+head(crashes)
 ```
 
 ```{r}
-# Create an interactive map with filtration by:
-  # Crash type
-  # Year (before/after congestion pricing)
-  # Fatality
+# Create an interactive map:
 # Filtering to a sample
-data_sample <- sample_n(data, 1000)
+crashes_sample <- sample_n(crashes, 1000)
 
 # Mapping
-interactive_map <- leaflet(data = data_sample) %>%
+int_map <- leaflet(data = crashes_sample) %>%
   addTiles() %>%
   setView(lng = -73.9, lat = 40.7, zoom = 10) %>%
-  addMarkers(data_sample$LONGITUDE, 
-             data_sample$LATITUDE)
+  addMarkers(~long, 
+             ~lat) %>%
+  addPolygons(data = cbd_geofence,
+              color = "red")
 
-interactive_map
+int_map
 ```
+
+
 
