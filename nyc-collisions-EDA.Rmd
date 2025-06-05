@@ -3,6 +3,7 @@ title: "nyc-collisions-EDA"
 author: "Peter Silverstein"
 date: "`r Sys.Date()`"
 output: html_document
+runtime: shiny
 ---
 
 ```{r setup, include=FALSE}
@@ -16,14 +17,23 @@ library(tmap)
 library(leaflet)
 library(sf)
 library(lubridate)
+library(hms)
+library(DT)
 ```
 
-```{r}
-# Loading Central Business District Shape
-cbd_geofence <- read.csv("MTA_Central_Business_District_Geofence__Beginning_June_2024_20250605.csv", stringsAsFactors = FALSE)
-cbd_geofence <- st_as_sfc(cbd_geofence$polygon, crs = 2263)
+```{r echo=FALSE}
+# Weekday definition
+weekdays = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
+cp_initial_date <- as.Date("2025-01-05", format = "%Y-%m-%d")
+weekday_peak_start <- as_hms("05:00:00")
+weekend_peak_start <- as_hms("09:00:00")
+peak_end <- as_hms("21:00:00")
 
-# Loading collisions data
+# Loading Central Business District Shape: https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data
+cbd_geofence <- read.csv("MTA_Central_Business_District_Geofence__Beginning_June_2024_20250605.csv", stringsAsFactors = FALSE)
+cbd_geofence <- st_as_sfc(cbd_geofence$polygon, crs = 4326)
+
+# Loading collisions data: https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data 
 filter <- c(0, NA)
 
 crashes <- read.csv("Motor_Vehicle_Collisions_-_Crashes_20250605.csv") %>%
@@ -46,31 +56,167 @@ crashes <- read.csv("Motor_Vehicle_Collisions_-_Crashes_20250605.csv") %>%
     "persons_death" = "NUMBER.OF.PERSONS.KILLED"
   ) %>%
   mutate(
-    date = mdy(date),
-    time = hm(time)
-    #after_cp = ,
-    #cp_zone = 
+    date_parsed = mdy(date),
+    # Pad time to HH:MM if needed
+    time_padded = if_else(
+      str_count(time, ":") == 1,
+      paste0(str_pad(time, 5, pad = "0"), ":00"),
+      time
+    ),
+    # Combine date and time
+    datetime = ymd_hms(paste(date_parsed, time_padded), tz = "America/New_York")
+  ) %>%
+  st_as_sf(coords = c("long","lat"), crs = 4326)
+
+# Setting up dataframe for analysis
+df <- crashes %>%
+  select(
+    date_parsed,
+    time_padded,
+    datetime,
+    borough,
+    persons_inj,
+    persons_death,
+    geometry
+  ) %>%
+  mutate(
+    cp_zone = as.integer(lengths(st_intersects(geometry, cbd_geofence)) > 0),
+    after_cp = ifelse(datetime >= cp_initial_date, 1, 0),
+    treatment = ifelse(cp_zone == 1 & after_cp == 1, 1, 0),
+    borough_num = case_when(
+      borough == "MANHATTAN" ~ 1,
+      borough == "BRONX" ~ 2,
+      borough == "BROOKLYN" ~ 3,
+      borough == "QUEENS" ~ 4,
+      borough == "STATEN ISLAND" ~ 5,
+      borough == "" ~ 0
+    ),
+    day = weekdays(datetime),
+    time = as_hms(datetime),
+    peak_period = case_when(
+      day %in% weekdays & time >= weekday_peak_start & time <= peak_end ~ 1,
+      !(day %in% weekdays) & time >= weekend_peak_start & time <= peak_end ~ 1,
+      TRUE ~ 0
+    )
   )
 
-head(crashes)
+# Interactive Datatable
+set.seed(50)
+
+df_display <- df %>%
+  sample_n(10000) %>%
+  st_drop_geometry() %>%
+  select(date_parsed, time_padded, borough, persons_inj, persons_death, cp_zone, treatment, peak_period)
+datatable(df_display,
+          extensions = 'Buttons',
+          filter = "top",
+          colnames = c(
+            "Date",
+            "Time",
+            "Borough",
+            "Persons Injured",
+            "Persons Dead",
+            "CP Zone",
+            "Treatment",
+            "Peak Period"
+          ))
+```
+
+```{r echo=FALSE}
+# Create an interactive map:
+# Filtering to a sample
+set.seed(50)
+crashes_sample <- sample_n(df, 10000)
+
+sidebarLayout(
+  mainPanel(
+    leafletOutput("int_map", height = 400)
+  ),
+  sidebarPanel(
+    # Filter input
+    selectInput("test_filter", "Pre/Post Congestion Pricing", choices = c("All", "Pre", "Post"), selected = "All")
+  )
+)
+    
+observe({
+  output$int_map <- renderLeaflet({
+      filtered_data <- if(input$test_filter == "All"){
+        crashes_sample
+      } else {
+        dplyr::filter(crashes_sample, after_cp == ifelse(input$test_filter == "Pre", 0, 1))
+      }
+      # Mapping
+      leaflet(data = filtered_data) %>%
+        addTiles() %>%
+        setView(lng = -73.9, lat = 40.7, zoom = 10) %>%
+        addMarkers(clusterOptions = markerClusterOptions(
+          maxClusterRadius = 40,
+          showCoverageOnHover = TRUE
+        )) %>%
+        addPolygons(data = cbd_geofence,
+                    color = "red")
+    })
+})
 ```
 
 ```{r}
-# Create an interactive map:
-# Filtering to a sample
-crashes_sample <- sample_n(crashes, 1000)
+# Distribution of counts
+df_time_counts <- df %>%
+  st_drop_geometry() %>%
+  group_by(date_parsed) %>%
+  summarize(collisions = n(), .groups = "drop")
 
-# Mapping
-int_map <- leaflet(data = crashes_sample) %>%
-  addTiles() %>%
-  setView(lng = -73.9, lat = 40.7, zoom = 10) %>%
-  addMarkers(~long, 
-             ~lat) %>%
-  addPolygons(data = cbd_geofence,
-              color = "red")
+count_dist_overall <- ggplot(data = df_time_counts,
+                             aes(x = collisions)) +
+  geom_density()
 
-int_map
+# renderPlot(count_dist_overall)
+count_dist_overall
 ```
 
+```{r echo=FALSE}
+# Time series by Borough
+df_time_borough <- df %>%
+  st_drop_geometry() %>%
+  group_by(borough, date_parsed) %>%
+  summarize(collisions = n(), .groups = "drop") %>%
+  filter(! borough == "")
+
+timeseries_borough_plot <- ggplot(data = df_time_borough,
+                                  aes(x = date_parsed,
+                                      y = collisions,
+                                      color = borough)) +
+  geom_smooth() +
+  theme_minimal()
+
+# renderPlot(timeseries_borough_plot)
+timeseries_borough_plot
+```
+
+```{r echo=FALSE}
+# Time series by CP Zone
+df_time_treat <- df %>%
+  st_drop_geometry() %>%
+  mutate(
+    cp_zone = as.factor(cp_zone)
+  ) %>%
+  group_by(date_parsed, cp_zone) %>%
+  summarize(collisions = n(), .groups = "drop") %>%
+  group_by(cp_zone) %>%
+  mutate(
+    collisions_std = as.numeric(scale(collisions))
+  ) %>%
+  ungroup()
+
+timeseries_treat_plot <- ggplot(data = df_time_treat,
+                                  aes(x = date_parsed,
+                                      y = collisions_std,
+                                      color = cp_zone)) +
+  geom_line() +
+  theme_minimal()
+
+# renderPlot(timeseries_treat_plot)
+timeseries_treat_plot
+```
 
 
