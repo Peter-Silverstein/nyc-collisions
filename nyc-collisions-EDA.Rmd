@@ -1,0 +1,49 @@
+---
+title: "nyc-collisions-EDA"
+author: "Peter Silverstein"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+# Libraries
+library(tidyverse)
+library(tmap)
+library(leaflet)
+library(sf)
+```
+
+```{r}
+# Loading collisions data
+filter <- c(0, NA)
+
+data <- read.csv("Motor_Vehicle_Collisions_-_Crashes_20250605.csv") %>%
+  filter(! LATITUDE %in% filter,
+         ! LONGITUDE %in% filter) # %>%
+  # st_as_sf(coords=c("LONGITUDE", "LATITUDE"), crs = 2263)
+
+head(data)
+```
+
+```{r}
+# Create an interactive map with filtration by:
+  # Crash type
+  # Year (before/after congestion pricing)
+  # Fatality
+# Filtering to a sample
+data_sample <- sample_n(data, 1000)
+
+# Mapping
+interactive_map <- leaflet(data = data_sample) %>%
+  addTiles() %>%
+  setView(lng = -73.9, lat = 40.7, zoom = 10) %>%
+  addMarkers(data_sample$LONGITUDE, 
+             data_sample$LATITUDE)
+
+interactive_map
+```
+
