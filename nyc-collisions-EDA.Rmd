@@ -1,9 +1,10 @@
 ---
-title: "nyc-collisions-EDA"
+title: "Collisions and Congestion Pricing in NYC, an Exploratory Data Analysis"
 author: "Peter Silverstein"
 date: "`r Sys.Date()`"
-output: html_document
-runtime: shiny
+output: 
+  html_document:
+    code_folding: hide
 ---
 
 ```{r setup, include=FALSE}
@@ -15,13 +16,196 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(tmap)
 library(leaflet)
+library(leaflet.extras)
 library(sf)
 library(lubridate)
 library(hms)
 library(DT)
 ```
 
-```{r echo=FALSE}
+# Introduction
+
+In this post, I begin an investigation into the <a href="https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data"  target="_blank">Motor Vehicle Collisions - Crashes</a> dataset from NYC Open Data. The purpose of my inquiry is twofold. First, the <a href="https://www.nyc.gov/content/visionzero/pages/"  target="_blank">Vision Zero</a> initiative is an important effort by the city to reduce traffic deaths and I wanted to get acquainted with some of the data behind it. Second, just to be extra topical and relevant, I am interested to understand the relationship between traffic collisions and the <a href="https://congestionreliefzone.mta.info"  target="_blank">Congestion Relief Zone</a> introduced in early 2025. Through a few posts, my goal will be to explore these data and build some models to better understand the impact that the Congestion Relief Zone has on vehicle crashes (decreased due to lower car volume? increased due to less slow-moving traffic?).
+
+This post will be focused on exploratory data analysis. I will endeavor to get a handle on the main crashes dataset, join it up with some various spatial attributes (borough, census tract, etc.), and create some visualizations to help me understand how to tackle the modeling component of the project. My rough idea is to use a version of <a href="https://www.sciencedirect.com/science/article/abs/pii/S1877584518301175?via%3Dihub"  target="_blank">this Besag York Mollié (BYM)</a> Bayesian hierarchical model. In the linked paper, Morris et al. use the BYM model to model motor vehicle crashes involving school children at the census tract level. My thinking is that, if I can get their model to work, I could add a Difference-in-Difference component to capture changes in pre- and post-congestion pricing and get some sort of treatment effect. We'll see how far I get in that but, for now, I present some exploratory data analysis along with my thoughts.
+
+The GitHub repository for this project is available <a href="https://github.com/Peter-Silverstein/nyc-collisions"  target="_blank">here</a>. Also, note that you can expand code chunks if you wish using the button at the top-right of any visualizations.
+
+# Load Individual-Level Crash Data
+
+In terms of data loading, I'm going to be working with the NYC Motor Vehicle Collisions - Crashes dataset from NYC Open Data and will also be loading (a) the Central Business District shape (i.e., the congestion pricing zone) and (b) NYC Census Tract data so I can aggregate the individual crashes to the census tract level. Links to the various data sources are below:
+
+- <a href="https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data"  target="_blank">Motor Vehicle Collisions - Crashes</a>
+- <a href="https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data"  target="_blank">MTA Central Business District Geofence</a>
+- <a href="https://data.cityofnewyork.us/City-Government/2020-Census-Tracts/63ge-mke6/about_data "  target="_blank">NYC Census Tracts</a>
+
+## Interactive Data Table
+
+Below, you'll find an interactive data table containing a random sample of 10,000 of the 116,097 collisions records left after some data cleaning (you can see the data cleaning steps in the expandable code chunk). 
+
+```{r class.source = NULL}
+# Helper variables
+cp_initial_date <- as.Date("2025-01-05", format = "%Y-%m-%d")
+
+# Loading Central Business District Shape: https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data
+cbd_geofence <- read.csv("data/MTA_Central_Business_District_Geofence__Beginning_June_2024_20250605.csv", stringsAsFactors = FALSE)
+cbd_geofence <- st_as_sfc(cbd_geofence$polygon, crs = 4326)
+
+# Loading NYC Census Tracts: https://data.cityofnewyork.us/City-Government/2020-Census-Tracts/63ge-mke6/about_data 
+nyc_tracts <- read.csv("data/2020_Census_Tracts_20250606.csv", stringsAsFactors = FALSE) %>%
+  rename("geometry" = "the_geom")
+nyc_tracts <- st_as_sf(nyc_tracts, wkt = "geometry", crs = 4326)
+nyc_tracts <- nyc_tracts %>%
+  select(
+    geometry,
+    CT2020,
+    BoroCode,
+    BoroName,
+    Shape_Area
+  )
+
+# Loading collisions data: https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data 
+filter <- c(0, NA)
+
+crashes <- read.csv("data/Motor_Vehicle_Collisions_-_Crashes_20250605.csv") %>%
+  select(CRASH.DATE,
+         LATITUDE,
+         LONGITUDE,
+         NUMBER.OF.PERSONS.INJURED,
+         NUMBER.OF.PERSONS.KILLED,
+         NUMBER.OF.PEDESTRIANS.INJURED,
+         NUMBER.OF.PEDESTRIANS.KILLED) %>%
+  filter(! LATITUDE %in% filter,
+         ! LONGITUDE %in% filter) %>%
+  rename(
+    "date" = "CRASH.DATE",
+    "lat" = "LATITUDE",
+    "long" = "LONGITUDE",
+    "persons_inj" = "NUMBER.OF.PERSONS.INJURED",
+    "persons_death" = "NUMBER.OF.PERSONS.KILLED",
+    "ped_inj" = "NUMBER.OF.PEDESTRIANS.INJURED",
+    "ped_death" = "NUMBER.OF.PEDESTRIANS.KILLED"
+  ) %>%
+  mutate(
+    date = mdy(date)
+    ) %>%
+  st_as_sf(coords = c("long","lat"), crs = 4326)
+
+# Associating CP Zone, Pre/Post, Treatment, Borough, and Census Tract w/ Observations
+crashes <- crashes %>%
+  mutate(
+    cp_zone = as.integer(lengths(st_intersects(geometry, cbd_geofence)) > 0),
+    after_cp = ifelse(date >= cp_initial_date, 1, 0),
+    treatment = ifelse(cp_zone == 1 & after_cp == 1, 1, 0)
+  ) %>%
+  st_join(nyc_tracts, join = st_within)
+
+# Interactive Data Table
+set.seed(50)
+
+crashes_subset <- crashes %>%
+  sample_n(10000)
+
+crashes_dt <- crashes_subset %>%
+  st_drop_geometry()
+
+datatable(crashes_dt,
+          extensions = 'Buttons',
+          filter = "top",
+          colnames = c(
+            "Date",
+            "Persons Injured",
+            "Persons Killed",
+            "Pedestrians Injured",
+            "Pedestrians Dead",
+            "CP Zone",
+            "Before/After CP",
+            "Treatment",
+            "Census Tract",
+            "Borough Code",
+            "Borough Name",
+            "Census Tract Area"
+          ),
+          rownames = FALSE,
+          options = list(
+            autoWidth = TRUE,
+            scrollX = TRUE
+          ),
+           # Add this argument for inline CSS
+  class = 'compact', # optional: reduces padding
+  escape = FALSE
+) %>%
+  formatStyle(
+    columns = names(crashes_dt),
+    `white-space` = "nowrap",
+    `height` = "1.5em",
+    `line-height` = "1.5em"
+  )
+```
+
+## Interactive Map
+
+Next, I created an interactive map of the same sample of 10,000 collisions, along with the congestion pricing zone. This doesn't tell us a whole lot yet, but you can see that lower Manhattan is somewhat of a hotspot for crashes. We'll explore that with more maps later on.
+
+```{r class.source = NULL}
+# Create an interactive map:
+ind_crashes_map <- leaflet(data = crashes_subset) %>%
+  addTiles() %>%
+  setView(lng = -73.9, lat = 40.7, zoom = 10) %>%
+  addMarkers(clusterOptions = markerClusterOptions(
+    maxClusterRadius = 40,
+    showCoverageOnHover = TRUE),
+    popup = ~paste(
+      "Date:", date, "<br>",
+      "Persons Injured:", persons_inj, "<br>",
+      "Persons Killed:", persons_death)
+  ) %>%
+  addPolygons(data = cbd_geofence,
+              color = "red",
+              weight = 1,
+              fillOpacity = 0.5) %>%
+  addLegend(
+    position = "bottomright",
+    colors = "red",
+    labels = "Within Zone",
+    title = "Congestion Pricing Zone",
+    opacity = 0.8
+  ) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addControl(
+  html = '<h4 style="text-align: right;">
+            Crash Incidents in NYC<br>
+            <span style="display: block; margin-top: 0.4em;">2024-25</span>
+          </h4>',
+    position = "topright"
+  ) %>%
+  addResetMapButton()
+
+ind_crashes_map
+```
+
+With these basic visualizations out of the way, I think it would be interesting to begin to aggregate the observations to the tract level. The BYM model mentioned above relies on an <a href="https://mc-stan.org/learn-stan/case-studies/icar_stan.html"  target="_blank">Intrinsic Conditional Auto-Regressive (ICAR)</a> term that models counts in a discrete geographic area using surrounding areas. I'll get into it more in the next post, but TLDR: we need shapes (census tracts) with a single measure (count of crashes).
+
+# Aggregate to Census Tract Level
+
+## Map of Crash Count by Tract
+
+## Map of Clustering of Crash Count by Tract
+
+# Disaggregate Data to Monthly Crash Counts
+
+## Time Series of Monthly Crash Counts by Borough
+
+## Check Distributions of Crash Counts
+
+# Set Up Data Table for Analysis
+
+
+
+
+<--------------- OLD ---------------->
+
+```{r eval=FALSE, include=FALSE}
 # Weekday definition
 weekdays = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
 cp_initial_date <- as.Date("2025-01-05", format = "%Y-%m-%d")
@@ -107,6 +291,7 @@ df_display <- df %>%
   sample_n(10000) %>%
   st_drop_geometry() %>%
   select(date_parsed, time_padded, borough, persons_inj, persons_death, cp_zone, treatment, peak_period)
+
 datatable(df_display,
           extensions = 'Buttons',
           filter = "top",
@@ -122,45 +307,27 @@ datatable(df_display,
           ))
 ```
 
-```{r echo=FALSE}
+```{r eval=FALSE, include=FALSE}
 # Create an interactive map:
 # Filtering to a sample
 set.seed(50)
 crashes_sample <- sample_n(df, 10000)
 
-sidebarLayout(
-  mainPanel(
-    leafletOutput("int_map", height = 400)
-  ),
-  sidebarPanel(
-    # Filter input
-    selectInput("test_filter", "Pre/Post Congestion Pricing", choices = c("All", "Pre", "Post"), selected = "All")
-  )
-)
-    
-observe({
-  output$int_map <- renderLeaflet({
-      filtered_data <- if(input$test_filter == "All"){
-        crashes_sample
-      } else {
-        dplyr::filter(crashes_sample, after_cp == ifelse(input$test_filter == "Pre", 0, 1))
-      }
-      # Mapping
-      leaflet(data = filtered_data) %>%
-        addTiles() %>%
-        setView(lng = -73.9, lat = 40.7, zoom = 10) %>%
-        addMarkers(clusterOptions = markerClusterOptions(
-          maxClusterRadius = 40,
-          showCoverageOnHover = TRUE
-        )) %>%
-        addPolygons(data = cbd_geofence,
-                    color = "red")
-    })
-})
+map <- leaflet(data = crashes_sample) %>%
+  addTiles() %>%
+  setView(lng = -73.9, lat = 40.7, zoom = 10) %>%
+  addMarkers(clusterOptions = markerClusterOptions(
+    maxClusterRadius = 40,
+    showCoverageOnHover = TRUE
+  )) %>%
+  addPolygons(data = cbd_geofence,
+              color = "red")
+
+map
 ```
 
-```{r}
-# Distribution of counts
+```{r eval=FALSE, include=FALSE}
+# Distribution of counts (daily)
 df_time_counts <- df %>%
   st_drop_geometry() %>%
   group_by(date_parsed) %>%
@@ -170,11 +337,10 @@ count_dist_overall <- ggplot(data = df_time_counts,
                              aes(x = collisions)) +
   geom_density()
 
-# renderPlot(count_dist_overall)
 count_dist_overall
 ```
 
-```{r echo=FALSE}
+```{r eval=FALSE, include=FALSE}
 # Time series by Borough
 df_time_borough <- df %>%
   st_drop_geometry() %>%
@@ -189,11 +355,10 @@ timeseries_borough_plot <- ggplot(data = df_time_borough,
   geom_smooth() +
   theme_minimal()
 
-# renderPlot(timeseries_borough_plot)
 timeseries_borough_plot
 ```
 
-```{r echo=FALSE}
+```{r eval=FALSE, include=FALSE}
 # Time series by CP Zone
 df_time_treat <- df %>%
   st_drop_geometry() %>%
@@ -215,7 +380,6 @@ timeseries_treat_plot <- ggplot(data = df_time_treat,
   geom_line() +
   theme_minimal()
 
-# renderPlot(timeseries_treat_plot)
 timeseries_treat_plot
 ```
 
