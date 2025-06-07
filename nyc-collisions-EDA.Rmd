@@ -24,6 +24,8 @@ library(DT)
 library(RColorBrewer)
 library(spdep)
 library(kableExtra)
+library(scales)
+library(ggridges)
 ```
 
 # Introduction
@@ -138,8 +140,7 @@ datatable(crashes_dt,
             autoWidth = TRUE,
             scrollX = TRUE
           ),
-           # Add this argument for inline CSS
-  class = 'compact', # optional: reduces padding
+  class = 'compact',
   escape = FALSE
 ) %>%
   formatStyle(
@@ -196,7 +197,7 @@ With these basic visualizations out of the way, I think it would be interesting 
 # Aggregate to Census Tract Level
 
 ```{r class.source = NULL}
-# Aggregating/summarizing data so census tract level, no time component
+# Aggregating/summarizing data to census tract level, no time component
 crashes_grouped <- crashes %>%
   group_by(BoroCT2020) %>%
   summarize(tot_crashes = n(),
@@ -292,15 +293,279 @@ Our next step will be to *disaggregate* the data into discrete time buckets, bec
 
 # Disaggregate Data to Monthly Crash Counts
 
+Now, we'll zoom in with a bit more granularity on our numbers. Rather than aggregating to a single number across the whole time range of the data, I'll instead aggregate to monthly counts. In order to better visualize these trends, I'll drop the census tract granularity for now.
+
+One major reason for the following visualizations is that I'm intending on doing some version of a Difference-in-Difference (DiD) analysis. One of the key assumptions in DiD is "parallel trends." In essense, this means that pre-treatment, we want the treatment and control groups to be trending the same way. This makes sense--if they're not trending the same way, then none of the causal inference assumptions that we want to make are going to be satisfied (i.e., the treatment and control groups are not similar enough for a comparison). Now, there are statistical ways of testing this assumption, and I will get to these in the next post, but a visual inspection can give us a reasonable sense of where we lie in relation to the assumption. Further, this is one of those statistical assumptions that isn't really provable--we just want enough evidence in favor that we say "eh, ok, looks pretty good" and move on.
+
 ## Time Series of Monthly Crash Counts by Borough
+
+First, a plot of monthly crashes (per square mile, to give equivalency across boroughs of differing size). The included vertical dashed line indicates when the congestion pricing policy was put into effect. Right off the bat, these look pretty parallel to me. There's more variation in the boroughs with higher crash per square mile numbers, but that's intuitive and expected. It should be noted that this isn't really the parallel trends assumption in action, since Manhattan hasn't been split out into the CP Zone and non-CP Zone.
+
+```{r class.source = NULL}
+# Getting borough sq. miles to scale crash counts
+nyc_boro <- nyc_tracts %>%
+  st_drop_geometry() %>%
+  group_by(BoroName) %>%
+  summarize(
+    area = sum(area_sqm)
+  )
+
+# Extracting Month + Year for each observation for grouping
+crashes <- crashes %>%
+  mutate(
+    m_y = as.Date(paste0(format(as.Date(date), "%Y-%m"), "-01"))
+  )
+
+# Aggregating/summarizing data to borough level, along with month+year
+crashes_grouped_monthboro <- crashes %>%
+  group_by(m_y, BoroName) %>%
+  summarize(tot_crashes = n(), .groups = "drop") %>%
+  st_drop_geometry() %>%
+  mutate(
+    BoroName = as.factor(BoroName)
+  ) %>%
+  filter(m_y < "2025-06-01") %>%
+  left_join(nyc_boro,
+            by = "BoroName") %>%
+  mutate(
+    crashes_per_sqm = tot_crashes / area
+  )
+
+# Time series plot
+scale_boro <- c("Bronx" = "#E69F00", 
+                "Brooklyn" = "#56B4E9",
+                "Manhattan" = "#009E73",
+                "Queens" = "#CC79A7",
+                "Staten Island" = "#0072B2")
+
+ts_boro_plot <- ggplot(data = crashes_grouped_monthboro,
+                       aes(x = m_y,
+                           y = crashes_per_sqm,
+                           group = BoroName)) + 
+  geom_line(aes(color = BoroName)) + 
+  theme_minimal() + 
+  geom_segment(aes(x = as.Date("2025-01-01"), xend = as.Date("2025-01-01"),
+                   y = 0, yend = 60),
+               color = "black", linetype = "dashed", linewidth = 0.75) +  
+  labs(title = "Monthly Crashes per Square Mile, by Borough",
+       x = "",
+       y = "Crashes") +
+  annotate("text", 
+           x = as.Date("2025-05-01"), 
+           y = 27, 
+           label = "Bronx", 
+           color = "#E69F00",
+           hjust = 1) +
+  annotate("text", 
+           x = as.Date("2025-05-01"), 
+           y = 37, 
+           label = "Brooklyn", 
+           color = "#56B4E9",
+           hjust = 1) +
+  annotate("text", 
+           x = as.Date("2025-05-01"), 
+           y = 48, 
+           label = "Manhattan", 
+           color = "#009E73",
+           hjust = 1) +
+  annotate("text", 
+           x = as.Date("2025-05-01"), 
+           y = 16, 
+           label = "Queens", 
+           color = "#CC79A7",
+           hjust = 1) +
+  annotate("text", 
+           x = as.Date("2025-05-01"), 
+           y = 4, 
+           label = "Staten Island", 
+           color = "#0072B2",
+           hjust = 1) + 
+  annotate("text", 
+           x = as.Date("2025-01-05"), 
+           y = 62, 
+           label = "Congestion Pricing Starts", 
+           color = "black") + 
+  scale_color_manual(name = "Borough", 
+                     values = scale_boro) + 
+  theme(legend.position = "none") + 
+  scale_x_date(
+    limits = as.Date(c('2024-01-01', '2025-05-01')),
+    breaks = seq(as.Date('2024-01-01'), as.Date('2025-05-01'), by = '2 months'),
+    date_labels = "%b %Y"
+  )
+
+ts_boro_plot
+```
+
+## CP Zone/non-CP Zone 
+
+Now, we can look at the treatment and control groups. A note before I talk about the graph. In my final modeling, I'll be doing what any good modeler does and including pre-treatment covariates into the model to adjust for differences between tracts. This might include things like density, measures of road speed limits, etc. Absent that effort, and wanting to just get a quick visual inspection, I simply filtered the dataset to only Manhattan tracts, and compared tracts within the zone and outside the zone. This is hardly ideal, since tract characteristics can, and do, vary within Manhattan.
+
+```{r class.source = NULL}
+# Area of CP Zone (and converted from m^2 to square miles)
+cp_area <- as.numeric(sum(st_area(cbd_geofence))) / 2589988.11
+manhattan_tot_area <- as.numeric(nyc_boro[nyc_boro$BoroName == "Manhattan", "area"])
+
+# Aggregating/summarizing data to CP Zone/Non-CP Zone, along with month+year
+crashes_grouped_monthzone <- crashes %>%
+  filter(BoroName == "Manhattan") %>%
+  group_by(m_y, cp_zone) %>%
+  summarize(tot_crashes = n(), .groups = "drop") %>%
+  st_drop_geometry() %>%
+  filter(m_y < "2025-06-01") %>%
+  mutate(
+    cp_zone_verbose = as.factor(ifelse(cp_zone == 1, "In Zone", "Out of Zone")),
+    area = ifelse(cp_zone == 1, cp_area, manhattan_tot_area - cp_area),
+    crashes_per_sqm = tot_crashes / area
+  )
+
+# Time series plot
+scale_zone <- c("In Zone" = "blue", 
+                "Out of Zone" = "red")
+
+ts_zone_plot <- ggplot(data = crashes_grouped_monthzone,
+                       aes(x = m_y,
+                           y = crashes_per_sqm,
+                           group = cp_zone_verbose)) + 
+  geom_line(aes(color = cp_zone_verbose)) + 
+  theme_minimal() + 
+  geom_segment(aes(x = as.Date("2025-01-01"), xend = as.Date("2025-01-01"),
+                   y = 0, yend = 70),
+               color = "black", linetype = "dashed", linewidth = 0.75) +  
+  labs(title = "Monthly Crashes per Square Mile, in Manhattan, by CP Zone",
+       x = "",
+       y = "Crashes") +
+  annotate("text", 
+           x = as.Date("2025-05-01"), 
+           y = 66, 
+           label = "In Zone", 
+           color = "blue",
+           hjust = 1) +
+  annotate("text", 
+           x = as.Date("2025-05-01"), 
+           y = 42, 
+           label = "Out of Zone", 
+           color = "red",
+           hjust = 1) +
+  annotate("text", 
+           x = as.Date("2025-01-05"), 
+           y = 72, 
+           label = "Congestion Pricing Starts", 
+           color = "black") + 
+  scale_color_manual(name = "Zone", 
+                     values = scale_zone) + 
+  theme(legend.position = "none") + 
+  scale_x_date(
+    limits = as.Date(c('2024-01-01', '2025-05-01')),
+    breaks = seq(as.Date('2024-01-01'), as.Date('2025-05-01'), by = '2 months'),
+    date_labels = "%b %Y"
+  )
+
+ts_zone_plot
+```
+
+Anyway, I'm reasonably happy with this. Pre-treatment, the trends look pretty parallel, and there's even some funky things going on post-treatment. We see a big drop in within-zone crash numbers from December 2024 to January 2025, right when policy was put into effect, but the a perhaps disproportionate increase in collisions again after that. Not enough to make any claims, but it does make me interested to model it.
+
+# Final EDA Steps
+
+Now, for the two final things I want to get done in this post: have a quick look at crash distributions, and set up a final data table that I can export out of this workbook and into my modeling one.
 
 ## Check Distributions of Crash Counts
 
-# Set Up Data Table for Analysis
+We can see in the ridgeplot below that monthly crashes per square mile follows some very normal-looking distributions for Staten Island, the Bronx, and Queens. Manhattan and Brooklyn, though, are (a) a bit more bumpy and (b) more spread out. Again, the increased spread makes sense given the differences in magnitudes between, say, Staten Island and Manhattan. The bumpiness is a bit more interesting and I'm not entirely sure what's going on with it. That said, both Manhattan and Brooklyn seem somewhat non-skewed (ok, Brooklyn is a *little* skewed), so I think these look ok. I believe my intended future models are going to use the Poisson distribution (and perhaps normal, I still have to revisit this), and these look plausibly Poisson-ish.
 
+```{r}
+crashes_grouped_monthboro$BoroName <- factor(
+  crashes_grouped_monthboro$BoroName,
+  levels = c("Staten Island", "Queens", "Bronx", "Brooklyn", "Manhattan")
+)
 
+boro_ridgeplot <- ggplot(data = crashes_grouped_monthboro,
+                             aes(x = crashes_per_sqm,
+                                 y = BoroName)) +
+  geom_density_ridges(aes(fill = BoroName),
+                      scale = 0.9,
+                      alpha = 0.7,
+                      bandwidth = 0.8) + 
+  theme_minimal() + 
+  theme(legend.position = "none",
+        axis.text = element_text(size=10,face="bold")) + 
+  scale_fill_manual(values = scale_boro) + 
+  labs(title = "Monthly Crashes per Square Mile Density, by Borough",
+       x = "Crashes per Square Mile",
+       y = "") + 
+  scale_x_continuous(
+    limits = c(0, NA),
+    breaks = seq(0, max(crashes_grouped_monthboro$crashes_per_sqm, na.rm = TRUE) + 10, by = 10)
+  )
 
+boro_ridgeplot
+```
 
+## Set Up Data Table for Analysis
+
+And, finally, below you can see a sample of the final dataset that I can export out of here. One big thing: some tracts span the treatment groups (i.e., lie half-in and half-out of the congestion pricing zone), and one month (January 2025) spans pre-post treatment. I'm gonna do some forking paths here, but transparently. First, I decided that if any of a tract falls within the congestion pricing zone, the whole tract will be counted as treated. Not perfect, but given that we just modeled how crash counts are correlated with nearby tracts, I think it's reasonable to assume. Second, I decided that *all* of January, 2025 should be "treated." Again, not ideal, but there were only 4 non-treated days in that month and the alternative was to either count it as entirely untreated (which is even more unreasonable) or try to lump the first 4 days in with December, 2024, which also seems like it would fudge results to make it look weird.
+
+```{r}
+# Final table to export
+crashes_tract_month <- crashes %>%
+  group_by(m_y, BoroCT2020) %>%
+  summarize(tot_crashes = n(), 
+            area_sqm = mean(area_sqm),
+            cp_zone = mean(cp_zone),
+            after_cp = mean(after_cp),
+            .groups = "drop") %>%
+  st_drop_geometry() %>%
+  filter(m_y < "2025-06-01") %>%
+  mutate(crashes_per_sqm = tot_crashes / area_sqm,
+         cp_zone = ifelse(cp_zone == 0, 0, 1),
+         after_cp = ifelse(after_cp == 0, 0, 1),
+         treatment = ifelse(cp_zone + after_cp == 2, 1, 0)) %>%
+  rename(
+    "time_period" = "m_y",
+    "census_tract" = "BoroCT2020"
+  )
+
+# Interactive Datatable
+
+set.seed(50)
+crashes_tract_month_sample <- crashes_tract_month %>%
+  sample_n(10000) %>%
+  mutate(
+    area_sqm = round(area_sqm, 3),
+    crashes_per_sqm = round(crashes_per_sqm, 3)
+  )
+
+datatable(crashes_tract_month_sample,
+          extensions = 'Buttons',
+          filter = "top",
+          colnames = c(
+            "Time Period",
+            "Census Tract",
+            "Total Crashes",
+            "Tract Area (Sq. Miles)",
+            "CP Zone",
+            "Before/After CP",
+            "Crashes per Square Mile",
+            "Treatment"
+          ),
+          rownames = FALSE,
+          options = list(
+            autoWidth = TRUE,
+            scrollX = TRUE
+          ),
+  class = 'compact',
+  escape = FALSE
+) %>%
+  formatStyle(
+    columns = names(crashes_tract_month_sample),
+    `white-space` = "nowrap",
+    `height` = "1.5em",
+    `line-height` = "1.5em"
+  )
+```
+
+And that's it! In the next post, I'll be test the parallel trends assumption, working on a node-matrix to define how my model will treat the autocorrelations between tracts, and attempting to get Stan to play ball so I can model crashes at both a general level and (hopefully) with that DiD term.
 
 ```{r eval=FALSE, include=FALSE}
 # <--------------- OLD CODE ----------------> #
