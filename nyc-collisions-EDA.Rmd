@@ -21,6 +21,9 @@ library(sf)
 library(lubridate)
 library(hms)
 library(DT)
+library(RColorBrewer)
+library(spdep)
+library(kableExtra)
 ```
 
 # Introduction
@@ -56,12 +59,15 @@ nyc_tracts <- read.csv("data/2020_Census_Tracts_20250606.csv", stringsAsFactors 
   rename("geometry" = "the_geom")
 nyc_tracts <- st_as_sf(nyc_tracts, wkt = "geometry", crs = 4326)
 nyc_tracts <- nyc_tracts %>%
+  mutate(
+    area_sqm = Shape_Area / 27878400
+  ) %>%
   select(
     geometry,
-    CT2020,
+    BoroCT2020,
     BoroCode,
     BoroName,
-    Shape_Area
+    area_sqm
   )
 
 # Loading collisions data: https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data 
@@ -98,7 +104,8 @@ crashes <- crashes %>%
     after_cp = ifelse(date >= cp_initial_date, 1, 0),
     treatment = ifelse(cp_zone == 1 & after_cp == 1, 1, 0)
   ) %>%
-  st_join(nyc_tracts, join = st_within)
+  st_join(nyc_tracts, join = st_within) %>%
+  filter(! is.na(area_sqm))
 
 # Interactive Data Table
 set.seed(50)
@@ -188,9 +195,100 @@ With these basic visualizations out of the way, I think it would be interesting 
 
 # Aggregate to Census Tract Level
 
+```{r class.source = NULL}
+# Aggregating/summarizing data so census tract level, no time component
+crashes_grouped <- crashes %>%
+  group_by(BoroCT2020) %>%
+  summarize(tot_crashes = n(),
+            area = mean(area_sqm)) %>%
+  ungroup() %>%
+  mutate(
+    crashes_per_area = tot_crashes / area
+  ) %>%
+  st_drop_geometry()
+
+crashes_tracts_overall <- nyc_tracts %>%
+  right_join(crashes_grouped, 
+             by = "BoroCT2020")
+```
+
+Our first step in the journey of aggregation is to simply aggregate to the census tract level, irrespective of time. That is, sum up the counts of crashes per census tract for the entire range of the data (in this case, 1/1/2024 to 6/1/2025). From there, my first priority was to establish that crash counts tend to cluster. It follows intuitively that census tracts near to each other are likely to have some of the same characteristics that might impact the number of crashes we expect to see: traffic volume, speed limits, road widths. Beyond intuition, though, I want to demonstrate this clustering as justification for the future spatial autoregressive models that I want to run.
+
 ## Map of Crash Count by Tract
 
-## Map of Clustering of Crash Count by Tract
+First, a simple map of crash counts per square mile for each tract in the city. I added the "per square mile" bit to handle cases where bigger census tracts are more likely to have more crashes, simply due to their size. In the map below, you can pretty easily see some apparent clustering. Further, this clustering tends to occur in places you might expect: busy, road-heavy, traffic heavy areas like Lower Manhattan, Downtown Brooklyn, and East Harlem/the Bronx. Notably, the Lower Manhattan area is pretty much consistent with the congestion pricing zone. The fact that this seems to be a hotspot is expected, but good to visually confirm.
+
+```{r class.source = NULL}
+# Mapping crashes per square mile across the city
+choropleth_overall <- tm_shape(crashes_tracts_overall) + 
+  tm_polygons(fill = "crashes_per_area",
+              fill.scale = tm_scale_intervals(values = "brewer.yl_or_rd",
+                                              style = "jenks"),
+              fill.legend = tm_legend(title = "Crashes per Sq. Mile"),
+              lwd = 0.3) +
+  tm_layout(legend.outside = TRUE, 
+            legend.outside.position = "right")
+
+choropleth_overall
+```
+
+For all the visual clarity of the graph, it's always a good idea to let statistics back up what you anecdotally observe.
+
+## Moran's I: Statistical Test for Clustering
+
+There's an inferential statistic for clustering: <a href="https://en.wikipedia.org/wiki/Moran's_I"  target="_blank">Moran's I</a>, which measures spatial autocorrelation. In other words, it tests if there is more (or less) correlation between nearby/bordering areas than a random distribution of values would suggest. In statistical inference speak, the null hypothesis is that there is no spatial clustering, and the alternative hypothesis is that areal units near to each other are more correlated. I hope I got all that right. 
+
+In more simple speak, if there's a statistically significant result from the test, that's a good sign for there being clustering. Given the visual examination above, it seems likely that we get a statistically significant result.
+
+I should note here that, as you will see later on, the distribution of crash counts is positively skewed (i.e., has a long right tail, which makes sense given the lower bound at 0). Apparently, Moran's I is pretty sensitive to this issue, and skewness is likely to result in more false positives. To remedy this issue, I transformed the crash counts to the square root scale (initially, I tried the log scale, but this resulted in a *left* skewed distribution and cannot handle counts of 0). This transformation was only for this piece of the analysis and, unless I say otherwise, I'll be using raw crash counts moving foward.
+
+```{r class.source = NULL, warning = FALSE}
+# Sqrt transform data to enforce normal distribution for Moran's I
+crashes_tracts_overall <- crashes_tracts_overall %>%
+  mutate(
+    sqrt_crashes_per_area = sqrt(crashes_per_area)
+  )
+
+# Get weights matrix
+# Identify tracts with no neighbors
+neighbors <- poly2nb(crashes_tracts_overall, queen = TRUE)
+no_neighbors <- which(card(neighbors) == 0)
+
+# Filter the original spatial dataframe to exclude these tracts
+if (length(no_neighbors) > 0) {
+  crashes_tracts_overall_clean <- crashes_tracts_overall[-no_neighbors, ]
+} else {
+  crashes_tracts_overall_clean <- crashes_tracts_overall
+}
+
+# Rebuild neighbors and weights on the cleaned spatial data
+neighbors_clean <- poly2nb(crashes_tracts_overall_clean, queen = TRUE)
+weights_clean <- nb2listw(neighbors_clean, style = "W", zero.policy = TRUE)
+
+# Conducting Moran's I test for global clustering
+moran_global <- moran.test(crashes_tracts_overall_clean$sqrt_crashes_per_area, 
+                           weights_clean, 
+                           zero.policy = TRUE)
+
+# Create a summary data frame
+morans_df <- tibble(
+  Statistic = c("Moran's I", "Expected I", "Variance", "P-value"),
+  Value = c(
+    moran_global$estimate["Moran I statistic"],
+    moran_global$estimate["Expectation"],
+    moran_global$estimate["Variance"],
+    moran_global$p.value
+  )
+)
+
+# Print as a pretty table
+knitr::kable(morans_df, digits = 5) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = FALSE)
+```
+
+And hey presto! The p-value of < 0.00001 (it's actually way, way lower than that, but I couldn't quickly figure out a good way to show it) indicates there's strong spatial correlation, and there's less than a 1-in-100,000 chance that this clustering occurred by chance, roughly speaking. I'm really not that concerned with the perfect interpretation of the test results, this was more about proving there to be spatial correlation.
+
+Our next step will be to *disaggregate* the data into discrete time buckets, because I'm interested not only in modeling the spatial autocorrelation between the tracts, but also the impact of the congestion pricing zone implementation on 1/5/2025.
 
 # Disaggregate Data to Monthly Crash Counts
 
@@ -203,9 +301,10 @@ With these basic visualizations out of the way, I think it would be interesting 
 
 
 
-<--------------- OLD ---------------->
 
 ```{r eval=FALSE, include=FALSE}
+# <--------------- OLD CODE ----------------> #
+
 # Weekday definition
 weekdays = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
 cp_initial_date <- as.Date("2025-01-05", format = "%Y-%m-%d")
