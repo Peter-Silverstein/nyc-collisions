@@ -17,13 +17,16 @@ library(tidyverse)
 library(sf)
 library(tidycensus)
 library(keyring)
+library(DT)
+library(tmap)
+library(spdep)
 ```
 
 # Introduction
 
 In a prior post (LINK HERE), I began this project: a bit of a personal workshop in learning how to use Stan for spatial modeling. In that post, I did some exploratory data analysis to set up the overarching idea of the project, which is to (a) follow the example in LINK PAPER and use an ICAR model to model spatial dependencies in crashes across NYC and (b) potentially add a treatment/difference in difference component to this model to understand whether the congestion pricing policy has an effect on the number of vehicle crashes. In the interest of breaking this project into digestible chunks, I have decided that this, part 2 of 3, will focus only on the spatial modeling part. To that end, I'll be basically following this GUIDE from Mitzi Morris.
 
-```{r class.source = NULL}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Loading NYC Census Tracts: https://data.cityofnewyork.us/City-Government/2020-Census-Tracts/63ge-mke6/about_data 
 nyc_tracts <- read.csv("data/2020_Census_Tracts_20250606.csv", stringsAsFactors = FALSE) %>%
   rename("geometry" = "the_geom")
@@ -72,23 +75,33 @@ crashes <- read.csv("data/Motor_Vehicle_Collisions_-_Crashes_20250605.csv") %>%
 tidycensus_api_key <- key_get(service = "tidycensus_API", username = "my_tidycensus")
 census_api_key(tidycensus_api_key)
 
-ACSlist <- load_variables(2022, "acs5", cache = TRUE)
-
 census_vars <- get_acs(state = "NY",
-                    county = c("Bronx", "Kings", "New York", "Queens", "Richmond"),
-                          geography = "tract",
-                          variables = c(medincome = "B19013_001",
-                                        population = "B01003_001",
-                                        medage = "B01002_001",
-                                        transport_baseline = "B08301_001",
-                                        perc_pubtransit = "B08301_010"),
-                          geometry = FALSE,
-                          keep_geo_vars = FALSE,
-                          year = 2022,
-                          output = "wide"
-                          )
-
-# NEXT: CALCULATE VARIABLES OF INTEREST, SELECT, JOIN W/ MAIN, CHECK FOR NAs
+                       county = c("Bronx", "Kings", "New York", "Queens", "Richmond"),
+                       geography = "tract",
+                       variables = c(medincome = "B19013_001",
+                                     population = "B01003_001",
+                                     median_age = "B01002_001",
+                                     transport_baseline = "B08301_001",
+                                     transport_pubtransit = "B08301_010"),
+                       geometry = FALSE,
+                       keep_geo_vars = FALSE,
+                       year = 2022,
+                       output = "wide"
+                       ) %>%
+  mutate(
+    GEOID = as.numeric(GEOID),
+    median_income = medincomeE,
+    population = populationE,
+    median_age = median_ageE,
+    prop_pubtransit = transport_pubtransitE / transport_baselineE
+  ) %>%
+  select(
+    GEOID,
+    median_income,
+    population,
+    median_age,
+    prop_pubtransit
+  )
 
 # Associating CP Zone, Pre/Post, Treatment, Borough, and Census Tract w/ Observations
 crashes <- crashes %>%
@@ -101,14 +114,204 @@ crashes_tract <- crashes %>%
   summarize(tot_crashes = n(),
             area = mean(area_sqm)) %>%
   ungroup() %>%
-  mutate(
-    crashes_per_area = tot_crashes / area
-  ) %>%
   st_drop_geometry()
+
+# Getting Fragmentation Index from: https://github.com/mitzimorris/geomed_2024/blob/main/data/nyc_study.geojson
+
+frag_data = st_read(file.path("data", "nyc_study.geojson"), quiet = TRUE) %>%
+  st_drop_geometry() %>%
+  select(BoroCT2010, frag_index, traffic) %>%
+  mutate(
+    BoroCT2010 = as.numeric(BoroCT2010)
+  )
 
 # Joining everything together, selecting only variables that I want
 crashes_tracts_geo <- nyc_tracts %>%
   right_join(crashes_tract, 
-             by = "BoroCT2020")
+             by = "BoroCT2020") %>%
+  left_join(census_vars,
+            by = "GEOID") %>%
+  left_join(frag_data,
+            by = c("BoroCT2020" = "BoroCT2010")) %>%
+  mutate(
+    pop_per_sqm = population / area_sqm
+  ) %>%
+  select(! c(area, population))
+
+# Interactive Data Table for Display
+crashes_dt <- crashes_tracts_geo %>%
+  st_drop_geometry() %>%
+  mutate(
+    area_sqm = round(area_sqm, 3),
+    prop_pubtransit = round(prop_pubtransit, 3),
+    pop_per_sqm = round(pop_per_sqm, 3),
+  )
+
+datatable(crashes_dt,
+          extensions = 'Buttons',
+          filter = "top",
+          rownames = FALSE,
+          options = list(
+            autoWidth = TRUE,
+            scrollX = TRUE
+          ),
+  class = 'compact',
+  escape = FALSE
+) %>%
+  formatStyle(
+    columns = names(crashes_dt),
+    `white-space` = "nowrap",
+    `height` = "1.5em",
+    `line-height` = "1.5em"
+  )
 ```
+
+# More Plots
+
+## Histogram of Collisions per Square Mile
+```{r class.source=NULL}
+ggplot(data = crashes_tracts_geo, aes(x = tot_crashes)) + 
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 500, 
+                 color = "lightblue",
+                 fill = "lightblue",
+                 alpha = 0.75) + 
+  geom_density(color = "#FFC600", linewidth = 1) + 
+  theme_bw() + 
+  labs(title = "Distribution Total Crashes per Census Tract (2024-25)",
+       x = "Number of Crashes",
+       y = "Density")
+```
+
+## Choropleth Maps
+
+### Map of Collisions
+```{r}
+crash_map <- tm_shape(crashes_tracts_geo) + 
+  tm_polygons(fill = "tot_crashes",
+              fill.scale = tm_scale_intervals(values = "brewer.yl_or_rd",
+                                              style = "jenks"),
+              fill.legend = tm_legend(title = "Total Crashes, 2024-25"),
+              lwd = 0.3) +
+  tm_layout(legend.outside = TRUE, 
+            legend.outside.position = "right")
+
+crash_map
+```
+
+### Predictor Maps
+
+#### Median Income // Median Age
+```{r}
+income_map <- tm_shape(crashes_tracts_geo) + 
+  tm_polygons(fill = "median_income",
+              fill.scale = tm_scale_intervals(values = "brewer.greens",
+                                              style = "jenks"),
+              fill.legend = tm_legend(title = "Median Income"),
+              lwd = 0.3) +
+  tm_layout(legend.outside = TRUE, 
+            legend.outside.position = "right")
+
+medianage_map <- tm_shape(crashes_tracts_geo) + 
+  tm_polygons(fill = "median_age",
+              fill.scale = tm_scale_intervals(values = "brewer.blues",
+                                              style = "jenks"),
+              fill.legend = tm_legend(title = "Median Age"),
+              lwd = 0.3) +
+  tm_layout(legend.outside = TRUE, 
+            legend.outside.position = "right")
+
+tmap_arrange(income_map,
+             medianage_map,
+             nrow = 1, ncol = 2)
+```
+
+#### Proportion Using Public Transit to Commute // Population per Square Mile
+```{r}
+prop_pubtransit_map <- tm_shape(crashes_tracts_geo) + 
+  tm_polygons(fill = "prop_pubtransit",
+              fill.scale = tm_scale_intervals(values = "brewer.purples",
+                                              style = "jenks",
+                                              value.na = "grey"),
+              fill.legend = tm_legend(title = "Proportion that Commute Using Public Transit"),
+              lwd = 0.3) +
+  tm_layout(legend.outside = TRUE, 
+            legend.outside.position = "right")
+
+pop_per_sqm_map <- tm_shape(crashes_tracts_geo) + 
+  tm_polygons(fill = "pop_per_sqm",
+              fill.scale = tm_scale_intervals(values = "brewer.yl_gn",
+                                              style = "jenks"),
+              fill.legend = tm_legend(title = "Population per Square Mile"),
+              lwd = 0.3) +
+  tm_layout(legend.outside = TRUE, 
+            legend.outside.position = "right")
+
+tmap_arrange(prop_pubtransit_map,
+             pop_per_sqm_map,
+             nrow = 1, ncol = 2)
+```
+
+#### Fragmentation Index // Traffic
+```{r}
+frag_map <- tm_shape(crashes_tracts_geo) + 
+  tm_polygons(fill = "frag_index",
+              fill.scale = tm_scale_intervals(values = "brewer.pu_or",
+                                              style = "quantile",
+                                              midpoint = 0,
+                                              value.na = "grey"),
+              fill.legend = tm_legend(title = "Fragmentation Index"),
+              lwd = 0.3) +
+  tm_layout(legend.outside = TRUE, 
+            legend.outside.position = "right")
+
+traffic_map <- tm_shape(crashes_tracts_geo) + 
+  tm_polygons(fill = "traffic",
+              fill.scale = tm_scale_intervals(values = "brewer.oranges",
+                                              style = "quantile",
+                                              midpoint = 0,
+                                              value.na = "grey"),
+              fill.legend = tm_legend(title = "Traffic"),
+              lwd = 0.3) +
+  tm_layout(legend.outside = TRUE, 
+            legend.outside.position = "right")
+
+tmap_arrange(frag_map,
+             traffic_map,
+             nrow = 1, ncol = 2)
+```
+
+# Moving from a Map to Spatial Dependencies
+
+## Map/Graph of Neighbor Links
+```{r warning=FALSE}
+nyc_nbs = poly2nb(crashes_tracts_geo)
+nyc_coords = st_coordinates(st_centroid(crashes_tracts_geo['geometry']))
+
+# Create a spatial points sf object for centroids
+centroids_sf <- st_as_sf(data.frame(x = nyc_coords[,1], y = nyc_coords[,2]), 
+                         coords = c("x", "y"), 
+                         crs = st_crs(crashes_tracts_geo))
+
+# Plot with tmap
+spdep_map <- tm_shape(crashes_tracts_geo) +
+  tm_polygons(col = "white") + 
+  tm_lines(col = "white", lwd = 2) + 
+
+  # Add points for centroids
+  tm_shape(centroids_sf) +
+  tm_dots(size = 0.25, col = "black") +
+
+  # Add lines for neighbors
+  tm_shape(st_as_sf(nb2lines(nyc_nbs, coords = nyc_coords))) +
+  tm_lines(col = "deepskyblue3")
+
+spdep_map
+```
+
+# NEXT STEPS IS UNDERSTAND WHAT MORRIS IS DOING LOL
+
+
+
+
 
