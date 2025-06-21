@@ -1,0 +1,114 @@
+---
+title: "Spatial Modeling of Collisions in NYC"
+author: "Peter Silverstein"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+# Libraries
+library(tidyverse)
+library(sf)
+library(tidycensus)
+library(keyring)
+```
+
+# Introduction
+
+In a prior post (LINK HERE), I began this project: a bit of a personal workshop in learning how to use Stan for spatial modeling. In that post, I did some exploratory data analysis to set up the overarching idea of the project, which is to (a) follow the example in LINK PAPER and use an ICAR model to model spatial dependencies in crashes across NYC and (b) potentially add a treatment/difference in difference component to this model to understand whether the congestion pricing policy has an effect on the number of vehicle crashes. In the interest of breaking this project into digestible chunks, I have decided that this, part 2 of 3, will focus only on the spatial modeling part. To that end, I'll be basically following this GUIDE from Mitzi Morris.
+
+```{r class.source = NULL}
+# Loading NYC Census Tracts: https://data.cityofnewyork.us/City-Government/2020-Census-Tracts/63ge-mke6/about_data 
+nyc_tracts <- read.csv("data/2020_Census_Tracts_20250606.csv", stringsAsFactors = FALSE) %>%
+  rename("geometry" = "the_geom")
+nyc_tracts <- st_as_sf(nyc_tracts, wkt = "geometry", crs = 4326)
+nyc_tracts <- nyc_tracts %>%
+  mutate(
+    area_sqm = Shape_Area / 27878400
+  ) %>%
+  select(
+    geometry,
+    BoroCT2020,
+    BoroCode,
+    BoroName,
+    area_sqm,
+    GEOID
+  )
+
+# Loading collisions data: https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data 
+filter <- c(0, NA)
+
+crashes <- read.csv("data/Motor_Vehicle_Collisions_-_Crashes_20250605.csv") %>%
+  select(CRASH.DATE,
+         LATITUDE,
+         LONGITUDE,
+         NUMBER.OF.PERSONS.INJURED,
+         NUMBER.OF.PERSONS.KILLED,
+         NUMBER.OF.PEDESTRIANS.INJURED,
+         NUMBER.OF.PEDESTRIANS.KILLED) %>%
+  filter(! LATITUDE %in% filter,
+         ! LONGITUDE %in% filter) %>%
+  rename(
+    "date" = "CRASH.DATE",
+    "lat" = "LATITUDE",
+    "long" = "LONGITUDE",
+    "persons_inj" = "NUMBER.OF.PERSONS.INJURED",
+    "persons_death" = "NUMBER.OF.PERSONS.KILLED",
+    "ped_inj" = "NUMBER.OF.PEDESTRIANS.INJURED",
+    "ped_death" = "NUMBER.OF.PEDESTRIANS.KILLED"
+  ) %>%
+  mutate(
+    date = mdy(date)
+    ) %>%
+  st_as_sf(coords = c("long","lat"), crs = 4326)
+
+# Grabbing some census variables via Tidycensus, using Keyring for API Key privacy
+tidycensus_api_key <- key_get(service = "tidycensus_API", username = "my_tidycensus")
+census_api_key(tidycensus_api_key)
+
+ACSlist <- load_variables(2022, "acs5", cache = TRUE)
+
+census_vars <- get_acs(state = "NY",
+                    county = c("Bronx", "Kings", "New York", "Queens", "Richmond"),
+                          geography = "tract",
+                          variables = c(medincome = "B19013_001",
+                                        population = "B01003_001",
+                                        medage = "B01002_001",
+                                        transport_baseline = "B08301_001",
+                                        perc_pubtransit = "B08301_010"),
+                          geometry = FALSE,
+                          keep_geo_vars = FALSE,
+                          year = 2022,
+                          output = "wide"
+                          )
+
+# NEXT: CALCULATE VARIABLES OF INTEREST, SELECT, JOIN W/ MAIN, CHECK FOR NAs
+
+# Associating CP Zone, Pre/Post, Treatment, Borough, and Census Tract w/ Observations
+crashes <- crashes %>%
+  st_join(nyc_tracts, join = st_within) %>%
+  filter(! is.na(area_sqm))
+
+# Aggregating/summarizing data to census tract level, no time component
+crashes_tract <- crashes %>%
+  group_by(BoroCT2020) %>%
+  summarize(tot_crashes = n(),
+            area = mean(area_sqm)) %>%
+  ungroup() %>%
+  mutate(
+    crashes_per_area = tot_crashes / area
+  ) %>%
+  st_drop_geometry()
+
+# Joining everything together, selecting only variables that I want
+crashes_tracts_geo <- nyc_tracts %>%
+  right_join(crashes_tract, 
+             by = "BoroCT2020")
+```
+
