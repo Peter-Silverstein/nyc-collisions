@@ -20,11 +20,22 @@ library(keyring)
 library(DT)
 library(tmap)
 library(spdep)
+library(cmdstanr)
+library(posterior)
+library(bayesplot)
+library(loo)
+library(parallel)
+cores = floor(parallel::detectCores() / 2)
 ```
 
 # Introduction
 
 In a prior post (LINK HERE), I began this project: a bit of a personal workshop in learning how to use Stan for spatial modeling. In that post, I did some exploratory data analysis to set up the overarching idea of the project, which is to (a) follow the example in LINK PAPER and use an ICAR model to model spatial dependencies in crashes across NYC and (b) potentially add a treatment/difference in difference component to this model to understand whether the congestion pricing policy has an effect on the number of vehicle crashes. In the interest of breaking this project into digestible chunks, I have decided that this, part 2 of 3, will focus only on the spatial modeling part. To that end, I'll be basically following this GUIDE from Mitzi Morris.
+
+
+MENTION INTERPOLATION
+
+
 
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Loading NYC Census Tracts: https://data.cityofnewyork.us/City-Government/2020-Census-Tracts/63ge-mke6/about_data 
@@ -133,18 +144,15 @@ crashes_tracts_geo <- nyc_tracts %>%
             by = "GEOID") %>%
   left_join(frag_data,
             by = c("BoroCT2020" = "BoroCT2010")) %>%
-  mutate(
-    pop_per_sqm = population / area_sqm
-  ) %>%
-  select(! c(area, population))
+  select(! c(area)) %>% 
+  filter(! if_any(everything(), is.na))
 
 # Interactive Data Table for Display
 crashes_dt <- crashes_tracts_geo %>%
   st_drop_geometry() %>%
   mutate(
     area_sqm = round(area_sqm, 3),
-    prop_pubtransit = round(prop_pubtransit, 3),
-    pop_per_sqm = round(pop_per_sqm, 3),
+    prop_pubtransit = round(prop_pubtransit, 3)
   )
 
 datatable(crashes_dt,
@@ -194,7 +202,7 @@ crash_map <- tm_shape(crashes_tracts_geo) +
               fill.legend = tm_legend(title = "Total Crashes, 2024-25"),
               lwd = 0.3) +
   tm_layout(legend.outside = TRUE, 
-            legend.outside.position = "right")
+            legend.outside.position = "right") 
 
 crash_map
 ```
@@ -226,7 +234,7 @@ tmap_arrange(income_map,
              nrow = 1, ncol = 2)
 ```
 
-#### Proportion Using Public Transit to Commute // Population per Square Mile
+#### Proportion Using Public Transit to Commute // Population
 ```{r}
 prop_pubtransit_map <- tm_shape(crashes_tracts_geo) + 
   tm_polygons(fill = "prop_pubtransit",
@@ -239,10 +247,10 @@ prop_pubtransit_map <- tm_shape(crashes_tracts_geo) +
             legend.outside.position = "right")
 
 pop_per_sqm_map <- tm_shape(crashes_tracts_geo) + 
-  tm_polygons(fill = "pop_per_sqm",
+  tm_polygons(fill = "population",
               fill.scale = tm_scale_intervals(values = "brewer.yl_gn",
                                               style = "jenks"),
-              fill.legend = tm_legend(title = "Population per Square Mile"),
+              fill.legend = tm_legend(title = "Population"),
               lwd = 0.3) +
   tm_layout(legend.outside = TRUE, 
             legend.outside.position = "right")
@@ -267,7 +275,7 @@ frag_map <- tm_shape(crashes_tracts_geo) +
 
 traffic_map <- tm_shape(crashes_tracts_geo) + 
   tm_polygons(fill = "traffic",
-              fill.scale = tm_scale_intervals(values = "brewer.oranges",
+              fill.scale = tm_scale_intervals(values = "brewer.reds",
                                               style = "quantile",
                                               midpoint = 0,
                                               value.na = "grey"),
@@ -284,6 +292,7 @@ tmap_arrange(frag_map,
 # Moving from a Map to Spatial Dependencies
 
 ## Map/Graph of Neighbor Links
+
 ```{r warning=FALSE}
 nyc_nbs = poly2nb(crashes_tracts_geo)
 nyc_coords = st_coordinates(st_centroid(crashes_tracts_geo['geometry']))
@@ -309,9 +318,144 @@ spdep_map <- tm_shape(crashes_tracts_geo) +
 spdep_map
 ```
 
-# NEXT STEPS IS UNDERSTAND WHAT MORRIS IS DOING LOL
+## Computing Properties of the Node Graph
 
+In the output below, we can see that there is 1 region with 0 links (an island), and 4 disjoint subgraphs, meaning networks that there are no paths between (Staten Island is a disjoint subgraph). This was done using the Queen's case method (think of the squares that a Queen can reach on a chessboard--not only directly bordering neighbors, but diagonals as well.
 
+Morris also recommends checking the rook's case, so I'm outputing the results from both below:
+
+```{r}
+nyc_nbs_rook = poly2nb(crashes_tracts_geo, queen=FALSE)
+cat("*** Queen metric nb summary ***\n\n")
+summary(nyc_nbs)
+cat("\n\n*** Rook metric nb summary ***\n\n")
+summary(nyc_nbs_rook)
+```
+
+So...really not much difference. About 1 link, on average, separates the connections for any given tract using the Queen's case vs. the Rook's.
+
+## Cleaning Neighbor Graph Objects
+
+NEED TO ADD MORE LINKS! OR FIGURE OUT MISSINGNESS
+
+Exactly what was needed in this department was a touch confusing to me. Essentially, I got the idea that (a) I should examine whether existing links in the graph made sense (e.g., if there's a link across water, does it make sense to keep it in from a pedestrian-focused context?) and then (b) make sure the final graph **is** fully connected, because that's a requirement of the ICAR model I want to use. In Morris's example it seems that part (a) was mostly an exercise in spatial data science, whereas the actual dataset used for the final analysis is the original graph with all of its cross-water connections and added links to make it a single component. The code below achieves this, and checks my work.
+
+### Link the Graph
+```{r}
+# Function to add a symmetric edge
+add_symmetric_edge_nb <- function(nb, i, j) {
+  nb_res = nb
+  if (!(j %in% nb[[i]])) {
+    if (nb[[i]][1] == 0) {
+      nb_res[[i]] = j
+    } else {
+      nb_res[[i]] <- sort(c(nb[[i]], j))
+    }
+  }
+  if (!(i %in% nb[[j]])) {
+    if (nb[[j]][1] == 0) {
+      nb_res[[j]] = i
+     } else {
+       nb_res[[j]] <- sort(c(nb[[j]], i))
+     }
+  }
+  return(nb_res)
+}
+
+nyc_nbs_connected = poly2nb(crashes_tracts_geo)
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(crashes_tracts_geo$BoroCT2020 == 3016400),
+                                          which(crashes_tracts_geo$BoroCT2020 == 5001800))
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(crashes_tracts_geo$BoroCT2020 == 4088400),
+                                          which(crashes_tracts_geo$BoroCT2020 == 4107201))
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(crashes_tracts_geo$BoroCT2020 == 4107201),
+                                          which(crashes_tracts_geo$BoroCT2020 == 4094201))
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(crashes_tracts_geo$BoroCT2020 == 4099801),
+                                          which(crashes_tracts_geo$BoroCT2020 == 4103202))
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(crashes_tracts_geo$BoroCT2020 == 2045600),
+                                          which(crashes_tracts_geo$BoroCT2020 == 2042600))
+
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(crashes_tracts_geo$BoroCT2020 == 1029900),
+                                          which(crashes_tracts_geo$BoroCT2020 == 2026900))
+
+# Checking Work
+spdep_map <- tm_shape(crashes_tracts_geo) +
+  tm_polygons(col = "white") + 
+  tm_lines(col = "white", lwd = 2) + 
+
+  # Add points for centroids
+  tm_shape(centroids_sf) +
+  tm_dots(size = 0.25, col = "black") +
+
+  # Add lines for neighbors
+  tm_shape(st_as_sf(nb2lines(nyc_nbs_connected, coords = nyc_coords))) +
+  tm_lines(col = "deepskyblue3")
+
+spdep_map
+```
+
+### Checking My Work
+```{r}
+cat('is symmetric? ', is.symmetric.nb(nyc_nbs_connected), '\n')
+summary(nyc_nbs_connected)
+cat('nodes per component')
+table(n.comp.nb(nyc_nbs_connected)$comp.id)
+```
+
+# Model Building Workflow
+
+This is where this notebook gets long. I'm going to document my whole process for iteratively fitting better and better models using Stan.
+
+```{r}
+poisson_model_file = file.path('stan', 'poisson_1.stan')
+cat(readLines(poisson_model_file), sep="\n")
+```
+
+So, this is not my model, it's the simple Poisson model that Morris uses. So, rather than understanding it because I wrote it, I'm going to understand it because I explain it to you in this section. First, the data:
+
+1. N: The number of observations (in this case, the number of census tracts)
+2. y: The outcome measure, number of crashes in 2024-25
+3. E: The "exposure" variable, which is the population of each tract. I believe this is separated from the rest of the predictor matrix, xs, so that it can be log transformed and then used as a separate component in the linear predictor.
+4. K: The number of predictor variables
+5. xs: A matrix containing N rows and K columns, which holds the predictor variables
+
+The transformed data block takes the log of population (E), which is a generally good principle for data that's constrained to be all positive. It also means that the coefficient goes to the multiplicative scale, which is nice for interpretation.
+
+In the parameters block, Morris defines an intercept, beta0, and a vector of coefficients, betas, for the covariates. The beta0 coefficient is split out so it can be applied to the log_E data.
+
+The model specifies that y comes from a Poisson distribution, and gives beta0 and betas simple standard normal distributions (mean 0, sd 1). 
+
+Lastly, the generated quantities block. In Morris's words, this is for use in model checking and model comparison. Y_rep is used to hold replicated data. Morris uses some optimization in this block that I don't entirely (or even really) understand, but this will be used to conduct posterior predictive checks. That is, we can simulate fake data and check their characteristics (mean, sd, quantiles) to see if the model does a good job. Morris uses leave-one-out cross validation, and uses the output from the `loo()` function--Expected Log Predictive Density (ELPD)--which gives the log-probability of new data given the model. A higher ELPD is better.
+
+```{r}
+design_mat <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+
+pois_data <- list(
+  N = nrow(crashes_tracts_geo),
+  y = as.integer(crashes_tracts_geo$tot_crashes),
+  E = as.integer(crashes_tracts_geo$population),
+  K = ncol(design_mat),
+  xs = design_mat
+)
+```
+
+```{r}
+poisson_model_1 <- cmdstan_model(poisson_model_file)
+set.seed(50)
+
+poisson_fit_1 <- poisson_model_1$sample(data=pois_data, parallel_chains=cores, refresh=0)
+print(poisson_fit_1)
+```
+
+Refinement: Mean-Center Predictor Data
 
 
 
