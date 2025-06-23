@@ -30,12 +30,15 @@ cores = floor(parallel::detectCores() / 2)
 
 # Introduction
 
-In a prior post (LINK HERE), I began this project: a bit of a personal workshop in learning how to use Stan for spatial modeling. In that post, I did some exploratory data analysis to set up the overarching idea of the project, which is to (a) follow the example in LINK PAPER and use an ICAR model to model spatial dependencies in crashes across NYC and (b) potentially add a treatment/difference in difference component to this model to understand whether the congestion pricing policy has an effect on the number of vehicle crashes. In the interest of breaking this project into digestible chunks, I have decided that this, part 2 of 3, will focus only on the spatial modeling part. To that end, I'll be basically following this GUIDE from Mitzi Morris.
+In a previous post (LINK HERE), I began an investigation into NYC Vehicle Collisions data (LINK HERE). This personal project is meant to help me (a) practice my geospatial data skills, (b) replicate the spatial dependency model used by Morris et al. (DATE) (LINK HERE), and (c) potentially extend that model to include a time component, which would theoretically allow me to model whether the congestion pricing zone has impacted vehicle collision rates in 2025. In the interest of breaking this project down into digestible and achievable chunks, I have decided that this, part 2 of 3, will focus on purely spatial modeling. Fortunately, Mitzi Morris published this (LINK HERE) guide to the topic, which I'll be following.
 
+# Data Loading, Joining, Basic Cleaning
 
-MENTION INTERPOLATION
+I outline most of the requisite data sources for the project in the previous post, although for this post I'm adding some tract-level traffic/built environment data (fragmentation index (LINK HERE) and traffic volume), as well as some ACS covariates (percentage of commuters that use public transit, population, median income, median age). My process here is to summarize the point-level crash data to the census tract level and then join it with the covariates. 
 
+One note: the fragmentation index and traffic variables provided by Morris only cover 2095 tracts (out of 2315 listed). There were also some ACS variables with NA values in a couple rows. Because I'm not trying to save the world, just figure out how to model things, I simply removed these from the analysis. In a different world (or perhaps the future), I would either find more complete data, determine which tracts I'm actually okay with filtering out (e.g., parks?), or interpolate the data in some way. 
 
+Below, please find a data table with the final dataset that I'm using.
 
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Loading NYC Census Tracts: https://data.cityofnewyork.us/City-Government/2020-Census-Tracts/63ge-mke6/about_data 
@@ -176,6 +179,8 @@ datatable(crashes_dt,
 
 # More Plots
 
+Before we move on, let's just do a couple of plots. 
+
 ## Histogram of Collisions per Square Mile
 ```{r class.source=NULL}
 ggplot(data = crashes_tracts_geo, aes(x = tot_crashes)) + 
@@ -192,6 +197,8 @@ ggplot(data = crashes_tracts_geo, aes(x = tot_crashes)) +
 ```
 
 ## Choropleth Maps
+
+Not all the predictors have a super clear relationship with the outcome variable, but it's a good idea to include them anyway.
 
 ### Map of Collisions
 ```{r}
@@ -291,7 +298,11 @@ tmap_arrange(frag_map,
 
 # Moving from a Map to Spatial Dependencies
 
+Ok--so we've visualized ad nauseum. Now, we've got to set up a spatial weights matrix. Essentially, something that tells us which of the tracts neighbor each other. In a different setting, we may want to vary weights (greater weight to tracts closer to the central tract, decreasing weights as we move away), but here we just set the weight equal to 1 if the tracts are neighbors and 0 if they are not. 
+
 ## Map/Graph of Neighbor Links
+
+The graph below shows these binary links between tracts. 
 
 ```{r warning=FALSE}
 nyc_nbs = poly2nb(crashes_tracts_geo)
@@ -418,11 +429,11 @@ cat(readLines(poisson_model_file), sep="\n")
 
 So, this is not my model, it's the simple Poisson model that Morris uses. So, rather than understanding it because I wrote it, I'm going to understand it because I explain it to you in this section. First, the data:
 
-1. N: The number of observations (in this case, the number of census tracts)
-2. y: The outcome measure, number of crashes in 2024-25
-3. E: The "exposure" variable, which is the population of each tract. I believe this is separated from the rest of the predictor matrix, xs, so that it can be log transformed and then used as a separate component in the linear predictor.
-4. K: The number of predictor variables
-5. xs: A matrix containing N rows and K columns, which holds the predictor variables
+1. **N:** The number of observations (in this case, the number of census tracts)
+2. **y:** The outcome measure, number of crashes in 2024-25
+3. **E:** The "exposure" variable, which is the population of each tract. I believe this is separated from the rest of the predictor matrix, xs, so that it can be log transformed and then used as a separate component in the linear predictor.
+4. **K:** The number of predictor variables
+5. **xs:** A matrix containing N rows and K columns, which holds the predictor variables
 
 The transformed data block takes the log of population (E), which is a generally good principle for data that's constrained to be all positive. It also means that the coefficient goes to the multiplicative scale, which is nice for interpretation.
 
