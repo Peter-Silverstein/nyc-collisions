@@ -32,11 +32,11 @@ source("helper-functions/utils_bym2.R")
 
 # Introduction
 
-In a previous post (LINK HERE), I began an investigation into NYC Vehicle Collisions data (LINK HERE). This personal project is meant to help me (a) practice my geospatial data skills, (b) replicate the spatial dependency model used by Morris et al. (DATE) (LINK HERE), and (c) potentially extend that model to include a time component, which would theoretically allow me to model whether the congestion pricing zone has impacted vehicle collision rates in 2025. In the interest of breaking this project down into digestible and achievable chunks, I have decided that this, part 2 of 3, will focus on purely spatial modeling. Fortunately, Mitzi Morris published this (LINK HERE) guide to the topic, which I'll be following.
+In a previous post, I began an investigation into the <a href="https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data"  target="_blank">Motor Vehicle Collisions - Crashes</a> dataset. This personal project is meant to help me (a) practice my geospatial data skills, (b) replicate the spatial dependency model used by <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC6830524/pdf/nihms-1537693.pdf"  target="_blank">Morris et al. (2019)</a>, and (c) potentially extend that model to include a time component, which would theoretically allow me to model whether the congestion pricing zone has impacted vehicle collision rates in 2025. In the interest of breaking this project down into digestible and achievable chunks, I have decided that this, part 2 of 3, will focus on purely spatial modeling. Fortunately, Mitzi Morris published this <a href="https://github.com/mitzimorris/geomed_2024"  target="_blank">guide</a> to the topic, which I'll be following.
 
 # Data Loading, Joining, Basic Cleaning
 
-I outline most of the requisite data sources for the project in the previous post, although for this post I'm adding some tract-level traffic/built environment data (fragmentation index (LINK HERE) and traffic volume), as well as some ACS covariates (percentage of commuters that use public transit, population, median income, median age). My process here is to summarize the point-level crash data to the census tract level and then join it with the covariates. 
+I outline most of the requisite data sources for the project in the previous post, although for this post I'm adding some tract-level traffic/built environment data (<a href="https://en.wikipedia.org/wiki/Fragmentation_(sociology)"  target="_blank">fragmentation index</a> and traffic volume), as well as some ACS covariates (percentage of commuters that use public transit, population, median income, median age). My process here is to summarize the point-level crash data to the census tract level and then join it with the covariates. 
 
 One note: the fragmentation index and traffic variables provided by Morris only cover 2095 tracts (out of 2315 listed). There were also some ACS variables with NA values in a couple rows. Because I'm not trying to save the world, just figure out how to model things, I simply removed these from the analysis. In a different world (or perhaps the future), I would either find more complete data, determine which tracts I'm actually okay with filtering out (e.g., parks?), or interpolate the data in some way. 
 
@@ -340,18 +340,6 @@ spdep_map
 
 In the outputs above and below, we can see that there are 2 regions with 0 links (islands), and 4 disjoint subgraphs, meaning networks that there are no paths between (Staten Island is a disjoint subgraph). This was done using the Queen's case method (think of the squares that a Queen can reach on a chessboard--not only directly bordering neighbors, but diagonals as well.
 
-Morris also recommends checking the rook's case, so I'm outputing the results from both below:
-
-```{r class.source=NULL, message=FALSE, warning=FALSE}
-nyc_nbs_rook = poly2nb(crashes_tracts_geo, queen=FALSE)
-cat("*** Queen metric nb summary ***\n\n")
-summary(nyc_nbs)
-cat("\n\n*** Rook metric nb summary ***\n\n")
-summary(nyc_nbs_rook)
-```
-
-So...really not much difference. About 1 link, on average, separates the connections for any given tract using the Queen's case vs. the Rook's.
-
 ## Cleaning Neighbor Graph Objects
 
 Exactly what was needed in this department was a touch confusing to me. Essentially, I got the idea that (a) I should examine whether existing links in the graph made sense (e.g., if there's a link across water, does it make sense to keep it in from a pedestrian-focused context?) and then (b) make sure the final graph **is** fully connected, because that's a requirement of the ICAR model I want to use. In Morris's example it seems that part (a) was mostly an exercise in spatial data manipulation, whereas the actual dataset used for the final analysis is the original graph with all of its cross-water connections and a few added links to make it a single component. The code below achieves this, and checks my work.
@@ -492,14 +480,14 @@ Ok, so here we have some output. First, the rhat values are all 1.00, which indi
 
 This is where we'll use the y_rep predicted values from the generated quantities block of the Stan model. We're hoping that the characteristics (mean, sd, quantiles) of y_rep match the true data as closely as possible. Morris included the helper functions `ppc_central_interval` and `ppc_y_yrep_overlay` in the "utils_dataviz.R" file. 
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 y_rep_pois <- as_draws_matrix(poisson_fit_1$draws("y_rep"))
 ppc_central_interval(y_rep_pois, pois_data$y)
 ```
 
 The output above shows that only 18% of the observed data points fall within the 50% predicted interval, which is not great. The graph below illustrates this. It does seem that the model doesn't handle low or high values all that well.
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 ppc_y_yrep_overlay(y_rep_pois, pois_data$y,
                      'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
 ```
@@ -551,14 +539,14 @@ print(pois_summary_subset)
 Alright, the rhat values look fine. Some of the coefficients are slightly different as a result of adding the varying intercepts, but I'm gonna breeze past interpretation for now. Let's check the model with posterior predictive checks.
 
 ### Posterior Predictive Checks
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 y_rep_pois <- as_draws_matrix(poisson_fit_2$draws("y_rep"))
 ppc_central_interval(y_rep_pois, pois_data$y)
 ```
 
 Hmmmm...this is fishy, too. We want about 50% of the observations to fall within the 50% interval, not almost 100%. I guess this model is way over-fit, which probably makes it a good candidate for some leave-one-out cross-validation.
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 ppc_y_yrep_overlay(y_rep_pois, pois_data$y,
                      'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
 ```
@@ -567,7 +555,7 @@ ppc_y_yrep_overlay(y_rep_pois, pois_data$y,
 
 So, LOO-CV should allow us to compare the models on how they perform on unseen data.
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 loo_1_pois <- loo(poisson_fit_1$draws("log_lik"), save_psis = TRUE)
 loo_2_pois <- loo(poisson_fit_2$draws("log_lik"), save_psis = TRUE)
 
@@ -576,7 +564,7 @@ loo_compare(loo_1_pois, loo_2_pois)
 
 The output above identifies the varying-intercepts model as a better fit to the data, which we kind of knew already. I am interested in those Pareto k diagnostic issues:
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 print("Model 1")
 pareto_k_table(loo_1_pois)
 
@@ -598,7 +586,7 @@ icar_1_model_file = file.path('stan', 'icar_1.stan')
 cat(readLines(icar_1_model_file), sep="\n")
 ```
 
-### Running the Model and Examining the Output
+## Running the Model and Examining the Output
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 nbs_adj = nbs_to_adjlist(nyc_nbs_connected)
 
@@ -638,7 +626,7 @@ Well then, the rhat values are still pretty low! Again, not going to fuss with c
 ## Checking the Fit
 
 ### The ICAR Correlation Matrix
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 phi_icar <- as_draws_matrix(icar_fit_1$draws("phi"))
 plot_icar_corr_matrix(phi_icar, 'ICAR correlation matrix')
 ```
@@ -647,13 +635,15 @@ I won't lie, the correlation matrix that Morris put together (admittedly with on
 
 ### Posterior Predictive Checks
 
+Before the checks, it's worth noting that apparently LOO doesn't work for ICAR, which I suppose makes sense, given that removing an observation would impact the spatial dependency network.
+
 We'll replicate the steps from the basic Poisson model to check our fit.
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 y_rep_icar <- as_draws_matrix(icar_fit_1$draws("y_rep"))
 ppc_central_interval(y_rep_icar, icar_data$y)
 ```
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 ppc_y_yrep_overlay(y_rep_icar, icar_data$y,
                      'Poisson + ICAR model PPC\ny (blue dot) vs. y_rep (orange 50% central interval, grey full extent)')
 ```
@@ -662,7 +652,130 @@ So, we **can** see that the predictive coverage is still comparable to the more 
 
 Morris basically makes the point that the ICAR component effectively accounts for the spatial dependence in the data while providing similar predictive coverage to the random effects Poisson model. The next step is to combine the two into a BYM2 model.
 
-# The BYM2 Model
+# Blending the Approaches with the Besag York Mollié (BYM) Model
+
+The Besag York Mollié (BYM) model has both a spatial dependency parameter and a random effects parameter. It uses a mixing parameter to get a blend between the two, depending on how much of the variation seen in the outcome variable is spatial.
+
+## The BYM2 Model
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+bym2_1_model_file = file.path('stan', 'bym2_1.stan')
+cat(readLines(bym2_1_model_file), sep="\n")
+```
+
+This model is still largely the same as the ones I've been running, with a few changes:
+
+1. **Tau** is a new component in the data block. Tau is used to rescale the variance of Phi (the spatial covariance matrix) to be approximately 1, in order to match the variance on the non-spatial random effects.
+2. **Rho** is a new parameter which estimates the proportion of variance explained by spatial effects. Note that the parameters block has both a spatial effects parameter (phi) and a random effects parameter (theta).
+3. The **Transformed Parameters** block calculates gamma, which is the blended mix of spatial and non-spatial effects.
+4. The **Model** and **Generated Quantities** blocks have been updated to properly utilize the new additions.
+
+## Setting up the Data Inputs
+
+This is almost identical to what I've been doing, with the addition now of tau.
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+nbs_adj = nbs_to_adjlist(nyc_nbs_connected)
+
+design_mat <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+
+tau = get_scaling_factor(nyc_nbs_connected)
+
+bym2_data <- list(
+  N = nrow(crashes_tracts_geo),
+  y = as.integer(crashes_tracts_geo$tot_crashes),
+  E = as.integer(crashes_tracts_geo$population),
+  K = ncol(design_mat),
+  xs = design_mat,
+  N_edges = ncol(nbs_adj),
+  neighbors = nbs_adj,
+  tau = tau
+)
+```
+
+## Prior Predictive Checks
+
+This is new to me, but Morris recommends simulating data directly from the prior. Essentially, it seems like we can look at the simulated data, which demonstrates the range of likely data based on the priors, and see if they seem well-conditioned. We're going to simulate the parameters gamma, phi, theta, and rho using a stripped-down version of the model above, now excluding the covariates and outcome variable.
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+bym2_gamma_ppc_model_file = file.path('stan', 'bym2_gamma_ppc.stan')
+cat(readLines(bym2_gamma_ppc_model_file), sep="\n")
+```
+
+With that model, we can run and take a look at the estimated values of phi, theta, and rho. In the output below, you can see that theta and rho are close to 1 and 0.5, which is what we want. I think the estimate for phi is a bit low...which I'm not entirely sure what to do with. I guess that we're meant to be seeing whether the variance for phi and theta are comparable/on similar scales, which they largely are.
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+bym2_gamma_ppc_model <- cmdstan_model(bym2_gamma_ppc_model_file)
+set.seed(50)
+
+bym2_gamma_ppc_fit <- bym2_gamma_ppc_model$sample(data=bym2_data, parallel_chains=cores, refresh=0)
+
+phi <- as_draws_matrix(bym2_gamma_ppc_fit$draws("phi"))
+phi_var_by_region <- apply(sqrt(1/tau) * phi, 2, var)  # variance across draws for each region
+print(paste("mean variance of phi scaled:", mean(phi_var_by_region)))
+theta <- as_draws_matrix(bym2_gamma_ppc_fit$draws("theta"))
+theta_var_by_region <- apply(theta, 2, var)  # variance across draws for each region
+print(paste("mean variance of theta:", mean(theta_var_by_region)))
+
+rho <- as_draws_array(bym2_gamma_ppc_fit$draws("rho"))
+print(paste("mean estimate of rho:", mean(rho)))
+```
+
+## Let's Run the Damn Thing
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+bym2_model_1 <- cmdstan_model(bym2_1_model_file)
+set.seed(50)
+
+bym2_fit_1 <- bym2_model_1$sample(data=bym2_data, parallel_chains=cores, refresh=0)
+
+bym2_summary <- bym2_fit_1$summary()
+vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'sigma', 'rho')
+bym2_summary_subset <- bym2_summary[bym2_summary$variable %in% vars, ]
+numeric_cols <- sapply(bym2_summary_subset, is.numeric)
+bym2_summary_subset[numeric_cols] <- round(bym2_summary_subset[numeric_cols], 3)
+
+print(bym2_summary_subset)
+```
+
+Alrighty--we're working with nice rhat values again! And, interestingly, the coefficient of 0.77 for rho means that these data are highly spatially correlated (it's the proportion of spatial variance in the combined spatial/non-spatial random effects). Next up, some posterior predictive checks and the correlation matrix.
+
+## Checking the Fit
+
+### The BYM2 Spatial Correlation Matrix
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+phi_bym2 <- as_draws_matrix(bym2_fit_1$draws("phi"))
+plot_icar_corr_matrix(phi_bym2, 'BYM2 spatial correlation matrix')
+```
+
+Ugh--kind of hard to read. There's definitely more red along the diagonal, which is good. Morris's graph showed the same pattern. I'm going to be honest, I'm starting to wonder whether my issue is actually that I have significantly more tracts than they do, so this might just be harder to read, absent any statistical difference.
+
+Anyway, let's do the posterior predictive checks.
+
+### Posterior Predictive Checks
+
+We'll replicate the steps from the other models to check our fit.
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+y_rep_bym2 <- as_draws_matrix(bym2_fit_1$draws("y_rep"))
+ppc_central_interval(y_rep_bym2, bym2_data$y)
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+ppc_y_yrep_overlay(y_rep_bym2, bym2_data$y,
+                     'Poisson + BYM2 model PPC\ny (blue dot) vs. y_rep (orange 50% central interval, grey full extent)')
+```
+
+The posterior predictive coverage for this model is just as good as the others, if not better. So, where have I gotten in this post? It's all become a bit abstract. My understanding of the purpose of the BYM2 model is that it's effective at handling both spatial and non-spatial random effects. I think this will continue to be important when I move to phase III of the project: introducing monthly counts to the data structure, rather than having a single summed count across everything. This addition of more hierarchical structure to the data (monthly effects, more variation within tracts) will allow me to hopefully understand trends over time.
+
+And on that bombshell, I think it's time to wrap up before this gets even longer.
+
+
+
+
+
+
+
 
 
 

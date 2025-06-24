@@ -3,7 +3,7 @@ library(spdep) |> suppressPackageStartupMessages()
 library(ggplot2)
 library(tidyverse) |> suppressPackageStartupMessages()
 library(igraph)
-
+library(Matrix)
 
 
 #  create edgelist for ICAR component
