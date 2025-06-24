@@ -26,6 +26,8 @@ library(bayesplot)
 library(loo)
 library(parallel)
 cores = floor(parallel::detectCores() / 2)
+source("helper-functions/utils_dataviz.R")
+source("helper-functions/utils_bym2.R")
 ```
 
 # Introduction
@@ -179,7 +181,7 @@ datatable(crashes_dt,
 
 # More Plots
 
-Before we move on, let's just do a couple of plots. 
+Though I made some plots in the previous post, I'll make some more here to hopefully illustrate (a) characteristics of the outcome variable and (b) visually explore how the predictor variables might be related to the outcome.
 
 ## Histogram of Collisions per Square Mile
 ```{r class.source=NULL}
@@ -196,12 +198,17 @@ ggplot(data = crashes_tracts_geo, aes(x = tot_crashes)) +
        y = "Density")
 ```
 
+This distribution has a mean of 50, standard deviation of 35, and variance of 1225, which is not great news for the Poisson distribution (which assumes that mean = variance). We'll see how that does
+
 ## Choropleth Maps
 
 Not all the predictors have a super clear relationship with the outcome variable, but it's a good idea to include them anyway.
 
 ### Map of Collisions
-```{r}
+
+It's worth noting that, in my previous post, I looked at crashes per square mile, whereas this analysis simply uses the raw counts. I believe this is (a) because the Poisson model is for discrete count data and (b) the dependency models adjust for population. I'm not 100% clear on why they're not using the per square mile measure, though.
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 crash_map <- tm_shape(crashes_tracts_geo) + 
   tm_polygons(fill = "tot_crashes",
               fill.scale = tm_scale_intervals(values = "brewer.yl_or_rd",
@@ -217,7 +224,7 @@ crash_map
 ### Predictor Maps
 
 #### Median Income // Median Age
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 income_map <- tm_shape(crashes_tracts_geo) + 
   tm_polygons(fill = "median_income",
               fill.scale = tm_scale_intervals(values = "brewer.greens",
@@ -242,7 +249,7 @@ tmap_arrange(income_map,
 ```
 
 #### Proportion Using Public Transit to Commute // Population
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 prop_pubtransit_map <- tm_shape(crashes_tracts_geo) + 
   tm_polygons(fill = "prop_pubtransit",
               fill.scale = tm_scale_intervals(values = "brewer.purples",
@@ -268,7 +275,7 @@ tmap_arrange(prop_pubtransit_map,
 ```
 
 #### Fragmentation Index // Traffic
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 frag_map <- tm_shape(crashes_tracts_geo) + 
   tm_polygons(fill = "frag_index",
               fill.scale = tm_scale_intervals(values = "brewer.pu_or",
@@ -286,7 +293,7 @@ traffic_map <- tm_shape(crashes_tracts_geo) +
                                               style = "quantile",
                                               midpoint = 0,
                                               value.na = "grey"),
-              fill.legend = tm_legend(title = "Traffic"),
+              fill.legend = tm_legend(title = "Traffic Volume"),
               lwd = 0.3) +
   tm_layout(legend.outside = TRUE, 
             legend.outside.position = "right")
@@ -304,7 +311,7 @@ Ok--so we've visualized ad nauseum. Now, we've got to set up a spatial weights m
 
 The graph below shows these binary links between tracts. 
 
-```{r warning=FALSE}
+```{r  class.source=NULL, message=FALSE, warning=FALSE}
 nyc_nbs = poly2nb(crashes_tracts_geo)
 nyc_coords = st_coordinates(st_centroid(crashes_tracts_geo['geometry']))
 
@@ -331,11 +338,11 @@ spdep_map
 
 ## Computing Properties of the Node Graph
 
-In the output below, we can see that there is 1 region with 0 links (an island), and 4 disjoint subgraphs, meaning networks that there are no paths between (Staten Island is a disjoint subgraph). This was done using the Queen's case method (think of the squares that a Queen can reach on a chessboard--not only directly bordering neighbors, but diagonals as well.
+In the outputs above and below, we can see that there are 2 regions with 0 links (islands), and 4 disjoint subgraphs, meaning networks that there are no paths between (Staten Island is a disjoint subgraph). This was done using the Queen's case method (think of the squares that a Queen can reach on a chessboard--not only directly bordering neighbors, but diagonals as well.
 
 Morris also recommends checking the rook's case, so I'm outputing the results from both below:
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 nyc_nbs_rook = poly2nb(crashes_tracts_geo, queen=FALSE)
 cat("*** Queen metric nb summary ***\n\n")
 summary(nyc_nbs)
@@ -347,12 +354,10 @@ So...really not much difference. About 1 link, on average, separates the connect
 
 ## Cleaning Neighbor Graph Objects
 
-NEED TO ADD MORE LINKS! OR FIGURE OUT MISSINGNESS
-
-Exactly what was needed in this department was a touch confusing to me. Essentially, I got the idea that (a) I should examine whether existing links in the graph made sense (e.g., if there's a link across water, does it make sense to keep it in from a pedestrian-focused context?) and then (b) make sure the final graph **is** fully connected, because that's a requirement of the ICAR model I want to use. In Morris's example it seems that part (a) was mostly an exercise in spatial data science, whereas the actual dataset used for the final analysis is the original graph with all of its cross-water connections and added links to make it a single component. The code below achieves this, and checks my work.
+Exactly what was needed in this department was a touch confusing to me. Essentially, I got the idea that (a) I should examine whether existing links in the graph made sense (e.g., if there's a link across water, does it make sense to keep it in from a pedestrian-focused context?) and then (b) make sure the final graph **is** fully connected, because that's a requirement of the ICAR model I want to use. In Morris's example it seems that part (a) was mostly an exercise in spatial data manipulation, whereas the actual dataset used for the final analysis is the original graph with all of its cross-water connections and a few added links to make it a single component. The code below achieves this, and checks my work.
 
 ### Link the Graph
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Function to add a symmetric edge
 add_symmetric_edge_nb <- function(nb, i, j) {
   nb_res = nb
@@ -411,20 +416,25 @@ spdep_map
 ```
 
 ### Checking My Work
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 cat('is symmetric? ', is.symmetric.nb(nyc_nbs_connected), '\n')
 summary(nyc_nbs_connected)
 cat('nodes per component')
 table(n.comp.nb(nyc_nbs_connected)$comp.id)
 ```
 
-# Model Building Workflow
+We can see here that the graph is symmetric, and that there is only a single component listed, with 1956 nodes. One confusing thing is that there are still 7 disjoint subgraphs in the output. I genuinely don't know why this is and I cannot figure it out, so if you're reading this and you do know, please email me.
 
-This is where this notebook gets long. I'm going to document my whole process for iteratively fitting better and better models using Stan.
+# Basic Model Building Workflow
 
-```{r}
-poisson_model_file = file.path('stan', 'poisson_1.stan')
-cat(readLines(poisson_model_file), sep="\n")
+Finally, the fun part. Now, I know that model building should be an extremely stepwise and iterative process--skipping steps is likely to result in issues. That said, I want to balance this with post length, so I'm roughly planning to include one model + output for each type of model I'm building.
+
+## Simple Poisson Model
+
+### The Model
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+poisson_1_model_file = file.path('stan', 'poisson_1.stan')
+cat(readLines(poisson_1_model_file), sep="\n")
 ```
 
 So, this is not my model, it's the simple Poisson model that Morris uses. So, rather than understanding it because I wrote it, I'm going to understand it because I explain it to you in this section. First, the data:
@@ -443,7 +453,10 @@ The model specifies that y comes from a Poisson distribution, and gives beta0 an
 
 Lastly, the generated quantities block. In Morris's words, this is for use in model checking and model comparison. Y_rep is used to hold replicated data. Morris uses some optimization in this block that I don't entirely (or even really) understand, but this will be used to conduct posterior predictive checks. That is, we can simulate fake data and check their characteristics (mean, sd, quantiles) to see if the model does a good job. Morris uses leave-one-out cross validation, and uses the output from the `loo()` function--Expected Log Predictive Density (ELPD)--which gives the log-probability of new data given the model. A higher ELPD is better.
 
-```{r}
+In the guide materials, Morris also makes some improvements to the model. Most notably, mean-centering the predictors. I ran the model without these adjustments and then added them. Output was, naturally, pretty similar. The improved model ran in only about 3 seconds per chain on my computer, as compared to 10-12 seconds for the original.
+
+### Running the Model and Examining the Output
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 design_mat <- as.data.frame(crashes_tracts_geo) %>%
   select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
   mutate(median_income = log(median_income),
@@ -458,15 +471,202 @@ pois_data <- list(
 )
 ```
 
-```{r}
-poisson_model_1 <- cmdstan_model(poisson_model_file)
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+poisson_model_1 <- cmdstan_model(poisson_1_model_file)
 set.seed(50)
 
 poisson_fit_1 <- poisson_model_1$sample(data=pois_data, parallel_chains=cores, refresh=0)
-print(poisson_fit_1)
+
+pois_summary <- poisson_fit_1$summary()
+vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]')
+pois_summary_subset <- pois_summary[pois_summary$variable %in% vars, ]
+numeric_cols <- sapply(pois_summary_subset, is.numeric)
+pois_summary_subset[numeric_cols] <- round(pois_summary_subset[numeric_cols], 3)
+
+print(pois_summary_subset)
 ```
 
-Refinement: Mean-Center Predictor Data
+Ok, so here we have some output. First, the rhat values are all 1.00, which indicates the model mixed properly. At a basic level, the negative coefficients on the first three predictors (prop_pubtransit, median_income, median_age), indicate that higher levels of public transit use, median income, and median age are all associated with lower counts of crashes in a census tract. Conversely, higher fragmentation index (beta[5]) and traffic volume (beta[6]) are associated with higher counts of crashes. These all pass the sniff test.
+
+### Posterior Predictive Checks
+
+This is where we'll use the y_rep predicted values from the generated quantities block of the Stan model. We're hoping that the characteristics (mean, sd, quantiles) of y_rep match the true data as closely as possible. Morris included the helper functions `ppc_central_interval` and `ppc_y_yrep_overlay` in the "utils_dataviz.R" file. 
+
+```{r}
+y_rep_pois <- as_draws_matrix(poisson_fit_1$draws("y_rep"))
+ppc_central_interval(y_rep_pois, pois_data$y)
+```
+
+The output above shows that only 18% of the observed data points fall within the 50% predicted interval, which is not great. The graph below illustrates this. It does seem that the model doesn't handle low or high values all that well.
+
+```{r}
+ppc_y_yrep_overlay(y_rep_pois, pois_data$y,
+                     'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
+```
+
+## Adding Random Effects to the Model
+
+Morris makes the point that the data are overdispersed (we saw that coming when looking at the distribution of the outcome variable earlier), meaning that the variance is higher than we expect ("we" being the users of the single-parameter Poisson model). The recommended solution is to add a simple random effects component to the model, which accounts for per-tract heterogeneity. This is similar to adding indicator variables for each tract, but assumes these varying intercepts come from a distribution.
+
+### The Model
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+poisson_2_model_file = file.path('stan', 'poisson_2.stan')
+cat(readLines(poisson_2_model_file), sep="\n")
+```
+
+So, the difference in the new model is that it includes additional parameters theta and sigma, which define the distribution that the varying intercepts are drawn from.
+
+### Running the Model and Examining the Output
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# Unchanged from previous model
+design_mat <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+
+pois_data <- list(
+  N = nrow(crashes_tracts_geo),
+  y = as.integer(crashes_tracts_geo$tot_crashes),
+  E = as.integer(crashes_tracts_geo$population),
+  K = ncol(design_mat),
+  xs = design_mat
+)
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+poisson_model_2 <- cmdstan_model(poisson_2_model_file)
+set.seed(50)
+
+poisson_fit_2 <- poisson_model_2$sample(data=pois_data, parallel_chains=cores, refresh=0)
+
+pois_summary <- poisson_fit_2$summary()
+vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma')
+pois_summary_subset <- pois_summary[pois_summary$variable %in% vars, ]
+numeric_cols <- sapply(pois_summary_subset, is.numeric)
+pois_summary_subset[numeric_cols] <- round(pois_summary_subset[numeric_cols], 3)
+
+print(pois_summary_subset)
+```
+
+Alright, the rhat values look fine. Some of the coefficients are slightly different as a result of adding the varying intercepts, but I'm gonna breeze past interpretation for now. Let's check the model with posterior predictive checks.
+
+### Posterior Predictive Checks
+```{r}
+y_rep_pois <- as_draws_matrix(poisson_fit_2$draws("y_rep"))
+ppc_central_interval(y_rep_pois, pois_data$y)
+```
+
+Hmmmm...this is fishy, too. We want about 50% of the observations to fall within the 50% interval, not almost 100%. I guess this model is way over-fit, which probably makes it a good candidate for some leave-one-out cross-validation.
+
+```{r}
+ppc_y_yrep_overlay(y_rep_pois, pois_data$y,
+                     'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
+```
+
+### Leave-One-Out Cross-Validation (LOO-CV)
+
+So, LOO-CV should allow us to compare the models on how they perform on unseen data.
+
+```{r}
+loo_1_pois <- loo(poisson_fit_1$draws("log_lik"), save_psis = TRUE)
+loo_2_pois <- loo(poisson_fit_2$draws("log_lik"), save_psis = TRUE)
+
+loo_compare(loo_1_pois, loo_2_pois)
+```
+
+The output above identifies the varying-intercepts model as a better fit to the data, which we kind of knew already. I am interested in those Pareto k diagnostic issues:
+
+```{r}
+print("Model 1")
+pareto_k_table(loo_1_pois)
+
+print("Model 2")
+pareto_k_table(loo_2_pois)
+```
+
+So, the second model does fit the data better, but the output in the second table tells me that upwards of 80% of the data points in my sample have unreliable LOO estimates. Morris mentions that this model handles overdispersion, but fails to distinguish between variance due to the spatial structure of the data and purely heterogeneous variance. If you think about it, this sort of makes sense. Model 2 doesn't allow the tracts around a given tract to have any impact on the estimates for that tract, which is going to cause unreliability. 
+
+# Intrinsic Conditional Auto-Regressive (ICAR) Modeling
+
+The ICAR model is a model of spatial dependency. Intuitively, it's pretty simple: the value of a region often depends on its neighbors. In a census tract situation, this is a totally reasonable intuition--it's pretty likely that census tracts next to each other are similar, whether that be in terms of who lives there, what the roads are like, etc. We'll include an ICAR prior in our Stan model--accounting for the correlation between spatial units by linking the estimates spatially. I'm sure Morris or Andrew Gelman would be horrified by that imprecise explanation, but that's why I'm not a PhD student.
+
+We can return to that spatially-linked data from earlier, finally. Since I spent the time building a fully-connected NYC graph, I'm going to model the whole city. 
+
+## The ICAR Model
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+icar_1_model_file = file.path('stan', 'icar_1.stan')
+cat(readLines(icar_1_model_file), sep="\n")
+```
+
+### Running the Model and Examining the Output
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+nbs_adj = nbs_to_adjlist(nyc_nbs_connected)
+
+design_mat <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+
+icar_data <- list(
+  N = nrow(crashes_tracts_geo),
+  y = as.integer(crashes_tracts_geo$tot_crashes),
+  E = as.integer(crashes_tracts_geo$population),
+  K = ncol(design_mat),
+  xs = design_mat,
+  N_edges = ncol(nbs_adj),
+  neighbors = nbs_adj
+)
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+icar_model_1 <- cmdstan_model(icar_1_model_file)
+set.seed(50)
+
+icar_fit_1 <- icar_model_1$sample(data=icar_data, parallel_chains=cores, refresh=0)
+
+icar_summary <- icar_fit_1$summary()
+vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma')
+icar_summary_subset <- icar_summary[icar_summary$variable %in% vars, ]
+numeric_cols <- sapply(icar_summary_subset, is.numeric)
+icar_summary_subset[numeric_cols] <- round(icar_summary_subset[numeric_cols], 3)
+
+print(icar_summary_subset)
+```
+
+Well then, the rhat values are still pretty low! Again, not going to fuss with coefficient interpretation just yet. Let's check the fit with the same posterior tools as before, as well as an ICAR correlation matrix.
+
+## Checking the Fit
+
+### The ICAR Correlation Matrix
+```{r}
+phi_icar <- as_draws_matrix(icar_fit_1$draws("phi"))
+plot_icar_corr_matrix(phi_icar, 'ICAR correlation matrix')
+```
+
+I won't lie, the correlation matrix that Morris put together (admittedly with only Brooklyn data) looks a bit "better" than mine. I gather that we're supposed to see greater correlation along the diagonal, since the components are listed in roughly geographic order. This does seem like a plot, though, that's heavily dependent on the order of your data...so I'm not super confident that mine is set up entirely the same as Morris's. 
+
+### Posterior Predictive Checks
+
+We'll replicate the steps from the basic Poisson model to check our fit.
+```{r}
+y_rep_icar <- as_draws_matrix(icar_fit_1$draws("y_rep"))
+ppc_central_interval(y_rep_icar, icar_data$y)
+```
+
+```{r}
+ppc_y_yrep_overlay(y_rep_icar, icar_data$y,
+                     'Poisson + ICAR model PPC\ny (blue dot) vs. y_rep (orange 50% central interval, grey full extent)')
+```
+
+So, we **can** see that the predictive coverage is still comparable to the more basic Poisson models that I ran. 98% coverage is still pretty high, but I believe this is because there's only one observation per tract, so there's not a great understanding of within-tract variability.
+
+Morris basically makes the point that the ICAR component effectively accounts for the spatial dependence in the data while providing similar predictive coverage to the random effects Poisson model. The next step is to combine the two into a BYM2 model.
+
+# The BYM2 Model
+
+
+
+
 
 
 
