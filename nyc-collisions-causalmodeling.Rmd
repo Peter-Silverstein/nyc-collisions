@@ -1,0 +1,50 @@
+---
+title: "Causal Analysis of the Effect of Congestion Pricing on Traffic Accidents in NYC"
+author: "Peter Silverstein"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+# Libraries
+library(tidyverse)
+library(sf)
+library(tidycensus)
+library(keyring)
+library(DT)
+library(tmap)
+library(spdep)
+library(cmdstanr)
+library(posterior)
+library(bayesplot)
+library(loo)
+library(parallel)
+cores = floor(parallel::detectCores() / 2)
+source("helper-functions/utils_dataviz.R")
+source("helper-functions/utils_bym2.R")
+```
+
+# Introduction
+
+# Data Preparation
+
+# Time Series Modeling
+
+# Combining BYM2 and Time Series Models
+
+
+
+
+
+
+
+
+
+
+
