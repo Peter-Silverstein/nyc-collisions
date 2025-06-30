@@ -34,6 +34,8 @@ source("helper-functions/utils_bym2.R")
 
 # Data Preparation
 
+I NEED MY DATA TO HAVE COLS FOR MONTH, YEAR, CENSUS TRACT ID
+
 # Time Series Modeling
 
 # Combining BYM2 and Time Series Models
