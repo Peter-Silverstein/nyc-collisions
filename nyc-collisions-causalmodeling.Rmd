@@ -32,9 +32,172 @@ source("helper-functions/utils_bym2.R")
 
 # Introduction
 
+This is part III of my personal project trying to use a variety of Stan modeling techniques to model collisions in NYC. This project is largely based on the NYC Collisions Dataset (INSERT LINK). In part I, I performed exploratory data analysis to better understand the data, as well as beginning to examine the sub-theme pattern in these data: whether the implementation of congestion pricing had an effect on crash numbers in the congestion pricing zone. In part II, I followed an excellent guide from Mitzi Morris to build a model of variation due to spatial dependency. This model effectively captured whether variation in the response variable (crash count) was due to spatial correlation or other random effects. The downside of this model was that it didn't have any real predictive ability--it couldn't handle new data well. That's sort of expected, given that each census tract only had one observation.
+
+Here in part III, my goal is to extend the model such that I can include a treatment effect. To do this, I need to add an additional source of variation to my model: time. That means I would have (a) variation due to the month and year in which the observation occurred, (b) variation correlated with neighboring census tracts, and (c) other within-tract heterogeneity. I will also include some covariate predictors in my model, as well as the treatment indicator.
+
+I will begin with a very simple Poisson model accounting for month-level and year-level effects using a super traditional hierarchical structure. 
+
 # Data Preparation
 
-I NEED MY DATA TO HAVE COLS FOR MONTH, YEAR, CENSUS TRACT ID
+The data preparation for this part is largely the same as the previous part, with two big exceptions. First, data are aggregated to the Tract/Month/Year level, to provide the hierarchical structure that my model needs. Second, I have included an indicator variable for whether the observed tract is within the congestion pricing zone and, for those that are, an indicator for whether the observed point is 01/2025 or later. I consider a tract observation within the zone from 01/2025 or later to be "treated."
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# Loading NYC Census Tracts: https://data.cityofnewyork.us/City-Government/2020-Census-Tracts/63ge-mke6/about_data 
+nyc_tracts <- read.csv("data/2020_Census_Tracts_20250606.csv", stringsAsFactors = FALSE) %>%
+  rename("geometry" = "the_geom")
+nyc_tracts <- st_as_sf(nyc_tracts, wkt = "geometry", crs = 4326)
+nyc_tracts <- nyc_tracts %>%
+  mutate(
+    area_sqm = Shape_Area / 27878400
+  ) %>%
+  select(
+    geometry,
+    BoroCT2020,
+    BoroCode,
+    BoroName,
+    area_sqm,
+    GEOID
+  )
+
+# Loading collisions data: https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data 
+filter <- c(0, NA)
+
+crashes <- read.csv("data/Motor_Vehicle_Collisions_-_Crashes_20250605.csv") %>%
+  select(CRASH.DATE,
+         LATITUDE,
+         LONGITUDE,
+         NUMBER.OF.PERSONS.INJURED,
+         NUMBER.OF.PERSONS.KILLED,
+         NUMBER.OF.PEDESTRIANS.INJURED,
+         NUMBER.OF.PEDESTRIANS.KILLED) %>%
+  filter(! LATITUDE %in% filter,
+         ! LONGITUDE %in% filter) %>%
+  rename(
+    "date" = "CRASH.DATE",
+    "lat" = "LATITUDE",
+    "long" = "LONGITUDE",
+    "persons_inj" = "NUMBER.OF.PERSONS.INJURED",
+    "persons_death" = "NUMBER.OF.PERSONS.KILLED",
+    "ped_inj" = "NUMBER.OF.PEDESTRIANS.INJURED",
+    "ped_death" = "NUMBER.OF.PEDESTRIANS.KILLED"
+  ) %>%
+  mutate(
+    date = mdy(date)
+    ) %>%
+  st_as_sf(coords = c("long","lat"), crs = 4326)
+
+# Grabbing some census variables via Tidycensus, using Keyring for API Key privacy
+tidycensus_api_key <- key_get(service = "tidycensus_API", username = "my_tidycensus")
+census_api_key(tidycensus_api_key)
+
+census_vars <- get_acs(state = "NY",
+                       county = c("Bronx", "Kings", "New York", "Queens", "Richmond"),
+                       geography = "tract",
+                       variables = c(medincome = "B19013_001",
+                                     population = "B01003_001",
+                                     median_age = "B01002_001",
+                                     transport_baseline = "B08301_001",
+                                     transport_pubtransit = "B08301_010"),
+                       geometry = FALSE,
+                       keep_geo_vars = FALSE,
+                       year = 2022,
+                       output = "wide"
+                       ) %>%
+  mutate(
+    GEOID = as.numeric(GEOID),
+    median_income = medincomeE,
+    population = populationE,
+    median_age = median_ageE,
+    prop_pubtransit = transport_pubtransitE / transport_baselineE
+  ) %>%
+  select(
+    GEOID,
+    median_income,
+    population,
+    median_age,
+    prop_pubtransit
+  )
+
+# Associating Borough, and Census Tract w/ Observations
+crashes <- crashes %>%
+  st_join(nyc_tracts, join = st_within) %>%
+  filter(! is.na(area_sqm))
+
+# Loading Central Business District Shape: https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data
+cbd_geofence <- read.csv("data/MTA_Central_Business_District_Geofence__Beginning_June_2024_20250605.csv", stringsAsFactors = FALSE)
+cbd_geofence <- st_as_sfc(cbd_geofence$polygon, crs = 4326)
+
+# Aggregating/summarizing data to census tract, month, year levels
+# Note the included components to fill month/year/tract combination with no crashes with 0
+crashes_tract <- crashes %>%
+  mutate(
+    month = as.numeric(format(date, "%m")),
+    year = as.numeric(format(date, "%y"))
+  ) %>%
+  group_by(BoroCT2020, month, year) %>%
+  summarize(tot_crashes = n(),
+            area = mean(area_sqm),
+            .groups = "drop") %>%
+  complete(BoroCT2020, month, year, fill = list(tot_crashes = 0)) %>% 
+  group_by(BoroCT2020) %>%
+  fill(area, .direction = "downup") %>%
+  ungroup() %>%
+  st_drop_geometry() %>%
+  select(! geometry) %>%
+  filter(! (year == 25 & month > 5))
+
+# Getting Fragmentation Index from: https://github.com/mitzimorris/geomed_2024/blob/main/data/nyc_study.geojson
+
+frag_data = st_read(file.path("data", "nyc_study.geojson"), quiet = TRUE) %>%
+  st_drop_geometry() %>%
+  select(BoroCT2010, frag_index, traffic) %>%
+  mutate(
+    BoroCT2010 = as.numeric(BoroCT2010)
+  )
+
+# Joining everything together, selecting only variables that I want
+crashes_tracts_geo <- nyc_tracts %>%
+  right_join(crashes_tract, 
+             by = "BoroCT2020") %>%
+  left_join(census_vars,
+            by = "GEOID") %>%
+  left_join(frag_data,
+            by = c("BoroCT2020" = "BoroCT2010")) %>%
+  select(! c(area)) %>% 
+  filter(! if_any(everything(), is.na)) %>%
+  mutate(
+    cp_zone = as.integer(lengths(st_intersects(geometry, cbd_geofence)) > 0),
+    after_cp = ifelse(year == 25, 1, 0),
+    treatment = ifelse(cp_zone == 1 & after_cp == 1, 1, 0)
+  )
+
+# Interactive Data Table for Display
+crashes_dt <- crashes_tracts_geo %>%
+  st_drop_geometry() %>%
+  mutate(
+    area_sqm = round(area_sqm, 3),
+    prop_pubtransit = round(prop_pubtransit, 3)
+  )
+
+datatable(crashes_dt,
+          extensions = 'Buttons',
+          filter = "top",
+          rownames = FALSE,
+          options = list(
+            autoWidth = TRUE,
+            scrollX = TRUE
+          ),
+  class = 'compact',
+  escape = FALSE
+) %>%
+  formatStyle(
+    columns = names(crashes_dt),
+    `white-space` = "nowrap",
+    `height` = "1.5em",
+    `line-height` = "1.5em"
+  )
+```
 
 # Time Series Modeling
 
