@@ -132,19 +132,22 @@ cbd_geofence <- st_as_sfc(cbd_geofence$polygon, crs = 4326)
 # Note the included components to fill month/year/tract combination with no crashes with 0
 crashes_tract <- crashes %>%
   mutate(
-    month = as.numeric(format(date, "%m")),
-    year = as.numeric(format(date, "%y"))
+    monthyear = format(date, "%m-%y")
   ) %>%
-  group_by(BoroCT2020, month, year) %>%
+  group_by(BoroCT2020, monthyear) %>%
   summarize(tot_crashes = n(),
             area = mean(area_sqm),
             .groups = "drop") %>%
-  complete(BoroCT2020, month, year, fill = list(tot_crashes = 0)) %>% 
+  complete(BoroCT2020, monthyear, fill = list(tot_crashes = 0)) %>% 
   group_by(BoroCT2020) %>%
   fill(area, .direction = "downup") %>%
   ungroup() %>%
   st_drop_geometry() %>%
   select(! geometry) %>%
+  mutate(
+    month = as.numeric(substr(monthyear, 1, 2)),
+    year = as.numeric(substr(monthyear, 4, 5))
+  ) %>%
   filter(! (year == 25 & month > 5))
 
 # Getting Fragmentation Index from: https://github.com/mitzimorris/geomed_2024/blob/main/data/nyc_study.geojson
@@ -170,6 +173,10 @@ crashes_tracts_geo <- nyc_tracts %>%
     cp_zone = as.integer(lengths(st_intersects(geometry, cbd_geofence)) > 0),
     after_cp = ifelse(year == 25, 1, 0),
     treatment = ifelse(cp_zone == 1 & after_cp == 1, 1, 0)
+  ) %>%
+  mutate(
+    tract_id = as.integer(factor(BoroCT2020)),
+    time_id = as.integer(factor(monthyear))
   )
 
 # Interactive Data Table for Display
@@ -199,17 +206,325 @@ datatable(crashes_dt,
   )
 ```
 
+## Visualizing the Distribution of Counts
+
+```{r}
+ggplot(data = crashes_tracts_geo, aes(x = tot_crashes)) + 
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 100, 
+                 color = "lightblue",
+                 fill = "lightblue",
+                 alpha = 0.75) + 
+  theme_bw() + 
+  labs(title = "Distribution Total Crashes per Census Tract (2024-25)",
+       x = "Number of Crashes",
+       y = "Density")
+```
+
 # Time Series Modeling
+
+## Initial Time Series Poisson Model
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# The Stan Model
+time_model_1_file = file.path('stan', 'poisson_time_1.stan')
+cat(readLines(time_model_1_file), sep="\n")
+```
+
+```{r}
+# Fitting the Model, Examining the Output
+
+# Setting up input data
+design_matrix <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+  
+N <- nrow(crashes_tracts_geo)
+y <- as.integer(crashes_tracts_geo$tot_crashes)
+E <- as.integer(crashes_tracts_geo$population)
+K <- ncol(design_matrix)
+xs <- design_matrix
+I <- length(unique(crashes_tracts_geo$tract_id))
+i_index <- crashes_tracts_geo$tract_id
+J <- length(unique(crashes_tracts_geo$time_id))
+j_index <- crashes_tracts_geo$time_id
+
+data_time_1 <- list(
+  N = N,
+  y = y,
+  E = E,
+  K = K,
+  xs = xs,
+  I = I,
+  J = J,
+  i_index = i_index,
+  j_index = j_index
+)
+
+time_model_1 <- cmdstan_model(time_model_1_file)
+set.seed(50)
+
+time_fit_1 <- time_model_1$sample(data=data_time_1, 
+                                  parallel_chains=cores, 
+                                  refresh=0)
+
+print(time_fit_1)
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# Posterior Checks
+y_rep_time <- as_draws_matrix(time_fit_1$draws("y_rep"))
+ppc_central_interval(y_rep_time, data_time_1$y)
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+ppc_y_yrep_overlay(y_rep_time, data_time_1$y,
+                     'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
+```
+
+```{r}
+# Check for Overdispersion
+mean_y <- mean(data_time_1$y)
+var_y <- var(data_time_1$y)
+
+cat("Mean:", mean_y, "Variance:", var_y, "Ratio:", var_y / mean_y, "\n")
+```
+
+## Time Series Negative Binomial Model
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# The Stan Model
+time_model_2_file = file.path('stan', 'poisson_time_2.stan')
+cat(readLines(time_model_2_file), sep="\n")
+```
+
+```{r}
+# Fitting the Model, Examining the Output
+
+# Setting up input data
+design_matrix <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+  
+N <- nrow(crashes_tracts_geo)
+y <- as.integer(crashes_tracts_geo$tot_crashes)
+E <- as.integer(crashes_tracts_geo$population)
+K <- ncol(design_matrix)
+xs <- design_matrix
+I <- length(unique(crashes_tracts_geo$tract_id))
+i_index <- crashes_tracts_geo$tract_id
+J <- length(unique(crashes_tracts_geo$time_id))
+j_index <- crashes_tracts_geo$time_id
+
+data_time_2 <- list(
+  N = N,
+  y = y,
+  E = E,
+  K = K,
+  xs = xs,
+  I = I,
+  J = J,
+  i_index = i_index,
+  j_index = j_index
+)
+
+time_model_2 <- cmdstan_model(time_model_2_file)
+set.seed(50)
+
+time_fit_2 <- time_model_2$sample(data=data_time_2, 
+                                  parallel_chains=cores, 
+                                  refresh=0)
+
+time_summary <- time_fit_2$summary()
+vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma', 'rho', 'nb_disp')
+time_summary_subset <- time_summary[time_summary$variable %in% vars, ]
+numeric_cols <- sapply(time_summary_subset, is.numeric)
+time_summary_subset[numeric_cols] <- round(time_summary_subset[numeric_cols], 3)
+
+print(time_summary_subset)
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# Posterior Checks
+y_rep_time2 <- as_draws_matrix(time_fit_2$draws("y_rep"))
+ppc_central_interval(y_rep_time2, data_time_2$y)
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+ppc_y_yrep_overlay(y_rep_time2, data_time_2$y,
+                     'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
+```
+
+```{r}
+# Check Zero Inflation
+n_zeros_obs <- sum(data_time_2$y == 0)
+n_zeros_pred <- apply(y_rep_time2, 1, function(x) sum(x == 0))
+mean_pred_zeros <- mean(n_zeros_pred)
+
+print(paste("Actual N Zeros:", n_zeros_obs, "Mean Pred Zeros:", mean_pred_zeros))
+```
 
 # Combining BYM2 and Time Series Models
 
+## Retrieving the Spatial Dependency Matrix
 
+```{r}
+# Get the spatial structure
+tracts_uniques <- crashes_tracts_geo %>%
+  select(tract_id, geometry, BoroCT2020) %>%
+  distinct() %>%
+  st_set_crs(st_crs(crashes_tracts_geo))
 
+nyc_nbs = poly2nb(tracts_uniques)
+nyc_coords = st_coordinates(st_centroid(tracts_uniques['geometry']))
 
+# Create a spatial points sf object for centroids
+centroids_sf <- st_as_sf(data.frame(x = nyc_coords[,1], y = nyc_coords[,2]), 
+                         coords = c("x", "y"), 
+                         crs = st_crs(tracts_uniques))
 
+# Function to add a symmetric edge
+add_symmetric_edge_nb <- function(nb, i, j) {
+  nb_res = nb
+  if (!(j %in% nb[[i]])) {
+    if (nb[[i]][1] == 0) {
+      nb_res[[i]] = j
+    } else {
+      nb_res[[i]] <- sort(c(nb[[i]], j))
+    }
+  }
+  if (!(i %in% nb[[j]])) {
+    if (nb[[j]][1] == 0) {
+      nb_res[[j]] = i
+     } else {
+       nb_res[[j]] <- sort(c(nb[[j]], i))
+     }
+  }
+  return(nb_res)
+}
 
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs, 
+                                          which(tracts_uniques$BoroCT2020 == 3016400),
+                                          which(tracts_uniques$BoroCT2020 == 5001800))
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(tracts_uniques$BoroCT2020 == 4088400),
+                                          which(tracts_uniques$BoroCT2020 == 4107201))
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(tracts_uniques$BoroCT2020 == 4107201),
+                                          which(tracts_uniques$BoroCT2020 == 4094201))
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(tracts_uniques$BoroCT2020 == 4099801),
+                                          which(tracts_uniques$BoroCT2020 == 4103202))
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(tracts_uniques$BoroCT2020 == 2045600),
+                                          which(tracts_uniques$BoroCT2020 == 2042600))
 
+nyc_nbs_connected = add_symmetric_edge_nb(nyc_nbs_connected, 
+                                          which(tracts_uniques$BoroCT2020 == 1029900),
+                                          which(tracts_uniques$BoroCT2020 == 2026900))
 
+lines_sp = nb2lines(nyc_nbs_connected, coords = nyc_coords, proj4string = st_crs(tracts_uniques)$wkt)
+lines_sf = st_as_sf(lines_sp)
 
+# Checking Work
+spdep_map <- tm_shape(tracts_uniques) +
+  tm_polygons(col = "white") + 
+  tm_lines(col = "white", lwd = 2) + 
+
+  # Add points for centroids
+  tm_shape(centroids_sf) +
+  tm_dots(size = 0.25, col = "black") +
+
+  # Add lines for neighbors
+  tm_shape(lines_sf) +
+  tm_lines(col = "deepskyblue3")
+
+spdep_map
+```
+
+```{r}
+cat('is symmetric? ', is.symmetric.nb(nyc_nbs_connected), '\n')
+summary(nyc_nbs_connected)
+cat('nodes per component')
+table(n.comp.nb(nyc_nbs_connected)$comp.id)
+```
+
+## Modeling
+
+```{r}
+# The Stan Model
+full_model_1_file = file.path('stan', 'full_model_1.stan')
+cat(readLines(full_model_1_file), sep="\n")
+```
+
+```{r}
+# Setting up input data
+nbs_adj <- nbs_to_adjlist(nyc_nbs_connected)
+
+design_matrix <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+  
+N <- nrow(crashes_tracts_geo)
+y <- as.integer(crashes_tracts_geo$tot_crashes)
+E <- as.integer(crashes_tracts_geo$population)
+K <- ncol(design_matrix)
+xs <- design_matrix
+I <- length(unique(crashes_tracts_geo$tract_id))
+i_index <- crashes_tracts_geo$tract_id
+J <- length(unique(crashes_tracts_geo$time_id))
+j_index <- crashes_tracts_geo$time_id
+N_edges <- ncol(nbs_adj)
+neighbors <- nbs_adj
+tau <- get_scaling_factor(nyc_nbs_connected)
+
+data_full_1 <- list(
+  N = N,
+  y = y,
+  E = E,
+  K = K,
+  xs = xs,
+  I = I,
+  J = J,
+  i_index = i_index,
+  j_index = j_index,
+  N_edges = N_edges,
+  neighbors = neighbors,
+  tau = tau
+)
+
+full_model_1 <- cmdstan_model(full_model_1_file)
+set.seed(50)
+
+full_fit_1 <- full_model_1$sample(data=data_full_1, 
+                                  parallel_chains=cores, 
+                                  refresh=0)
+
+full_summary <- full_fit_1$summary()
+vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma', 'rho', 'nb_disp')
+full_summary_subset <- full_summary[full_summary$variable %in% vars, ]
+numeric_cols <- sapply(full_summary_subset, is.numeric)
+full_summary_subset[numeric_cols] <- round(full_summary_subset[numeric_cols], 3)
+
+print(full_summary_subset)
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# Posterior Checks
+y_rep_full <- as_draws_matrix(full_fit_1$draws("y_rep"))
+ppc_central_interval(y_rep_full, data_full_1$y)
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+ppc_y_yrep_overlay(y_rep_full, data_full_1$y,
+                     'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
+```
+
+# Diagnostic Steps
+
+## Visualize residuals by space and time
 
 
