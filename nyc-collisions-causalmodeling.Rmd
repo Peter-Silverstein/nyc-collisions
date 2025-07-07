@@ -523,8 +523,78 @@ ppc_y_yrep_overlay(y_rep_full, data_full_1$y,
                      'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
 ```
 
-# Diagnostic Steps
+# Intensive Diagnostic Steps
 
-## Visualize residuals by space and time
+## Visualizing a Sample of Draws
+```{r}
+# Visualizing a sample of draws
+mask <- sample(4000, 8)
+index <- c("Draw 1", "Draw 2", "Draw 3", "Draw 4", "Draw 5", "Draw 6", "Draw 7", "Draw 8", "Original Sample")
 
+y_rep_full_sample <- as.data.frame(y_rep_full[mask,]) %>%
+  rbind(y)
+
+y_rep_full_sample <- cbind(index, y_rep_full_sample) %>%
+  pivot_longer(cols = -index)
+
+density_check <- ggplot(data = y_rep_full_sample, aes(x = value)) + 
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 100, 
+                 color = "lightblue",
+                 fill = "lightblue",
+                 alpha = 0.75) + 
+  theme_bw() + 
+  labs(title = "Distribution Total Crashes per Census Tract (2024-25)",
+       x = "Number of Crashes",
+       y = "Density")
+
+density_check + facet_wrap(~index, ncol = 3)
+```
+
+## Residuals by Time Period and Borough
+```{r}
+# Dealing with y_rep
+y_actuals_full <- matrix(, nrow = 4000, ncol = length(y))
+
+for (i in 1:4000){
+  y_actuals_full[i, ] <- y
+}
+
+y_rep_full_matrix <- as.matrix(y_rep_full)
+y_residuals_full <- y_actuals_full - y_rep_full_matrix
+
+y_residuals_mean <- apply(y_residuals_full, 2, mean)
+y_residuals_sd <- apply(y_residuals_full, 2, sd)
+
+crashes_withresiduals <- cbind(crashes_tracts_geo, y_residuals_mean, y_residuals_sd)
+
+# WORKING AREA
+crashes_withresiduals_grouped <- crashes_withresiduals %>%
+  group_by(monthyear, BoroName) %>%
+  summarize(mean_meanres = mean(y_residuals_mean), 
+            mean_sdres = sd(y_residuals_sd),
+            .groups = "drop") %>%
+  st_drop_geometry() %>%
+  mutate(
+    BoroName = as.factor(BoroName)
+  )
+
+# Time series plot
+scale_boro <- c("Bronx" = "#E69F00", 
+                "Brooklyn" = "#56B4E9",
+                "Manhattan" = "#009E73",
+                "Queens" = "#CC79A7",
+                "Staten Island" = "#0072B2")
+
+residuals_ts_boro_plot <- ggplot(data = crashes_withresiduals_grouped,
+                       aes(x = monthyear,
+                           y = mean_meanres,
+                           group = BoroName)) + 
+  geom_line(aes(color = BoroName)) + 
+  theme_minimal()
+
+residuals_ts_boro_plot
+```
+
+## COULD I RUN ANOTHER BYM2 MODEL TO DETERMINE HOW MUCH OF THE STDDEV VARIATION IS SPATIAL
 
