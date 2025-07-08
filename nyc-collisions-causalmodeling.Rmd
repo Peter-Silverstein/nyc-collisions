@@ -25,18 +25,24 @@ library(posterior)
 library(bayesplot)
 library(loo)
 library(parallel)
+library(patchwork)
 cores = floor(parallel::detectCores() / 2)
 source("helper-functions/utils_dataviz.R")
 source("helper-functions/utils_bym2.R")
+
+# For use in opening file and saving time
+# time_fit_1 <- readRDS("model-files/time_fit_1.rds")
+# time_fit_2 <- readRDS("model-files/time_fit_2.rds")
+# full_fit_1 <- readRDS("model-files/full_fit_1.rds")
 ```
 
 # Introduction
 
-This is part III of my personal project trying to use a variety of Stan modeling techniques to model collisions in NYC. This project is largely based on the NYC Collisions Dataset (INSERT LINK). In part I, I performed exploratory data analysis to better understand the data, as well as beginning to examine the sub-theme pattern in these data: whether the implementation of congestion pricing had an effect on crash numbers in the congestion pricing zone. In part II, I followed an excellent guide from Mitzi Morris to build a model of variation due to spatial dependency. This model effectively captured whether variation in the response variable (crash count) was due to spatial correlation or other random effects. The downside of this model was that it didn't have any real predictive ability--it couldn't handle new data well. That's sort of expected, given that each census tract only had one observation.
+This post is Part III of my project using Stan to model crash counts in New York City census tracts using the <a href="https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data"  target="_blank">Motor Vehicle Collisions - Crashes</a> dataset from NYC Open Data. The overarching goals of this project are to (a) improve my Stan modeling skill in a Bayesian workflow setting and (b) perform some causal inference to see if the <a href="https://congestionreliefzone.mta.info"  target="_blank">Congestion Relief Zone (CRZ)</a>, introduced in early 2025, impacted the number of collisions that occur in a census tract. In <a href="nyc-collisions-EDA.html"  target="_blank">Part I</a>, I performed exploratory data analysis through tables, visualizations, and tests for statistical clustering. In <a href="nyc-collisions-modeling.html"  target="_blank">Part II</a>, I modeled spatial correlation between crash counts in neighboring census tracts using a BYM2 model. Here, in Part III, I will extend the BYM2 model to include a time component, which means that my models will adjust for (a) unmeasured spatial variation, (b) unmeasured temporal variation, and (c) pre-treatment demographic and built-environment variables. This provides a good backbone for my eventual inclusion of a treatment indicator (whether the measurement was within the CRZ after congestion pricing was implemented), and an estimation of the treatment effect.
 
-Here in part III, my goal is to extend the model such that I can include a treatment effect. To do this, I need to add an additional source of variation to my model: time. That means I would have (a) variation due to the month and year in which the observation occurred, (b) variation correlated with neighboring census tracts, and (c) other within-tract heterogeneity. I will also include some covariate predictors in my model, as well as the treatment indicator.
+It is my intention to write a final post which presents the findings of this project in a concise manner. Knowing that the concise document is forthcoming, I can disregard concerns about length in this post and simply try to do good, transparent statistical modeling. In that vein, you can find the full GitHub repository for this project here: <a href="https://github.com/Peter-Silverstein/nyc-collisions"  target="_blank">https://github.com/Peter-Silverstein/nyc-collisions</a>.
 
-I will begin with a very simple Poisson model accounting for month-level and year-level effects using a super traditional hierarchical structure. 
+A final note before I get into it: this is a personal passion project, my time is somewhat limited, and my computer has its limits. I think, with sophisticated Stan modeling, there's always another thing you can do. I want to get this done and posted, so my plan is to do quite a few of those things, find a good place to call the model decent, and interpret the results with that caveat.
 
 # Data Preparation
 
@@ -63,7 +69,7 @@ nyc_tracts <- nyc_tracts %>%
 # Loading collisions data: https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data 
 filter <- c(0, NA)
 
-crashes <- read.csv("data/Motor_Vehicle_Collisions_-_Crashes_20250605.csv") %>%
+crashes <- read.csv("data/Motor_Vehicle_Collisions_-_Crashes_20250708.csv") %>%
   select(CRASH.DATE,
          LATITUDE,
          LONGITUDE,
@@ -148,7 +154,7 @@ crashes_tract <- crashes %>%
     month = as.numeric(substr(monthyear, 1, 2)),
     year = as.numeric(substr(monthyear, 4, 5))
   ) %>%
-  filter(! (year == 25 & month > 5))
+  filter(! (year == 25 & month > 6))
 
 # Getting Fragmentation Index from: https://github.com/mitzimorris/geomed_2024/blob/main/data/nyc_study.geojson
 
@@ -208,7 +214,9 @@ datatable(crashes_dt,
 
 ## Visualizing the Distribution of Counts
 
-```{r}
+One thing that will become important later on is the shape and characteristics of the distribution of crash counts, so I visualize it for posterity here.
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 ggplot(data = crashes_tracts_geo, aes(x = tot_crashes)) + 
   geom_histogram(aes(y = after_stat(density)), 
                  bins = 100, 
@@ -216,12 +224,14 @@ ggplot(data = crashes_tracts_geo, aes(x = tot_crashes)) +
                  fill = "lightblue",
                  alpha = 0.75) + 
   theme_bw() + 
-  labs(title = "Distribution Total Crashes per Census Tract (2024-25)",
+  labs(title = "Distribution of Total Crashes per Census Tract (2024-25)",
        x = "Number of Crashes",
        y = "Density")
 ```
 
 # Time Series Modeling
+
+Given that I already built a working BYM2 spatial dependency model in the previous part, I'll start this time with a simple hierarchical model providing heterogeneous effects for each time period within my data range, January 2024 through May 2025. I doubt that the number of crashes in one month predicts the number of crashes in the next month (i.e., is the city really implementing policy on the fly to address minor variation in car crash counts?), but I do think that it's likely that crash counts vary by month (and the EDA in Part I supported this). To that end, the model below models spatial variation as a hierarchy within each time frame. The use of the simplex for rho is unnecessary at this stage, but I will be using it when I combine the spatial model with this one, so might as well get it implemented early.
 
 ## Initial Time Series Poisson Model
 
@@ -231,7 +241,9 @@ time_model_1_file = file.path('stan', 'poisson_time_1.stan')
 cat(readLines(time_model_1_file), sep="\n")
 ```
 
-```{r}
+And here is the output:
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Fitting the Model, Examining the Output
 
 # Setting up input data
@@ -269,8 +281,12 @@ time_fit_1 <- time_model_1$sample(data=data_time_1,
                                   parallel_chains=cores, 
                                   refresh=0)
 
+saveRDS(time_fit_1, file = "model-files/time_fit_1.rds")
+
 print(time_fit_1)
 ```
+
+My rhat values are all very close to 1.01 (the ideal being 1.00, the gold standard being anything below 1.01, and the "it's fine" standard being anything below 1.1). To be honest, I'm not super fussed with the actual coefficient values 
 
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Posterior Checks
@@ -283,7 +299,7 @@ ppc_y_yrep_overlay(y_rep_time, data_time_1$y,
                      'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
 ```
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Check for Overdispersion
 mean_y <- mean(data_time_1$y)
 var_y <- var(data_time_1$y)
@@ -299,7 +315,7 @@ time_model_2_file = file.path('stan', 'poisson_time_2.stan')
 cat(readLines(time_model_2_file), sep="\n")
 ```
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Fitting the Model, Examining the Output
 
 # Setting up input data
@@ -337,6 +353,8 @@ time_fit_2 <- time_model_2$sample(data=data_time_2,
                                   parallel_chains=cores, 
                                   refresh=0)
 
+saveRDS(time_fit_2, file = "model-files/time_fit_2.rds")
+
 time_summary <- time_fit_2$summary()
 vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma', 'rho', 'nb_disp')
 time_summary_subset <- time_summary[time_summary$variable %in% vars, ]
@@ -357,7 +375,7 @@ ppc_y_yrep_overlay(y_rep_time2, data_time_2$y,
                      'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
 ```
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Check Zero Inflation
 n_zeros_obs <- sum(data_time_2$y == 0)
 n_zeros_pred <- apply(y_rep_time2, 1, function(x) sum(x == 0))
@@ -370,7 +388,7 @@ print(paste("Actual N Zeros:", n_zeros_obs, "Mean Pred Zeros:", mean_pred_zeros)
 
 ## Retrieving the Spatial Dependency Matrix
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Get the spatial structure
 tracts_uniques <- crashes_tracts_geo %>%
   select(tract_id, geometry, BoroCT2020) %>%
@@ -444,7 +462,7 @@ spdep_map <- tm_shape(tracts_uniques) +
 spdep_map
 ```
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 cat('is symmetric? ', is.symmetric.nb(nyc_nbs_connected), '\n')
 summary(nyc_nbs_connected)
 cat('nodes per component')
@@ -453,13 +471,13 @@ table(n.comp.nb(nyc_nbs_connected)$comp.id)
 
 ## Modeling
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # The Stan Model
 full_model_1_file = file.path('stan', 'full_model_1.stan')
 cat(readLines(full_model_1_file), sep="\n")
 ```
 
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Setting up input data
 nbs_adj <- nbs_to_adjlist(nyc_nbs_connected)
 
@@ -503,6 +521,8 @@ full_fit_1 <- full_model_1$sample(data=data_full_1,
                                   parallel_chains=cores, 
                                   refresh=0)
 
+saveRDS(full_fit_1, file = "model-files/full_fit_1.rds")
+
 full_summary <- full_fit_1$summary()
 vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma', 'rho', 'nb_disp')
 full_summary_subset <- full_summary[full_summary$variable %in% vars, ]
@@ -523,10 +543,11 @@ ppc_y_yrep_overlay(y_rep_full, data_full_1$y,
                      'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
 ```
 
+
 # Intensive Diagnostic Steps
 
 ## Visualizing a Sample of Draws
-```{r}
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Visualizing a sample of draws
 mask <- sample(4000, 8)
 index <- c("Draw 1", "Draw 2", "Draw 3", "Draw 4", "Draw 5", "Draw 6", "Draw 7", "Draw 8", "Original Sample")
@@ -551,8 +572,8 @@ density_check <- ggplot(data = y_rep_full_sample, aes(x = value)) +
 density_check + facet_wrap(~index, ncol = 3)
 ```
 
-## Residuals by Time Period and Borough
-```{r}
+## Residuals by Time Period
+```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Dealing with y_rep
 y_actuals_full <- matrix(, nrow = 4000, ncol = length(y))
 
@@ -568,33 +589,139 @@ y_residuals_sd <- apply(y_residuals_full, 2, sd)
 
 crashes_withresiduals <- cbind(crashes_tracts_geo, y_residuals_mean, y_residuals_sd)
 
-# WORKING AREA
+# Creating the dataset
 crashes_withresiduals_grouped <- crashes_withresiduals %>%
-  group_by(monthyear, BoroName) %>%
+  group_by(monthyear) %>%
   summarize(mean_meanres = mean(y_residuals_mean), 
-            mean_sdres = sd(y_residuals_sd),
+            mean_sdres = mean(y_residuals_sd),
             .groups = "drop") %>%
   st_drop_geometry() %>%
   mutate(
-    BoroName = as.factor(BoroName)
+    monthyear_date = as.Date(paste0("01-", monthyear), format = "%d-%m-%y")
   )
 
-# Time series plot
-scale_boro <- c("Bronx" = "#E69F00", 
-                "Brooklyn" = "#56B4E9",
-                "Manhattan" = "#009E73",
-                "Queens" = "#CC79A7",
-                "Staten Island" = "#0072B2")
-
+# Time series plot of mean residuals
 residuals_ts_boro_plot <- ggplot(data = crashes_withresiduals_grouped,
-                       aes(x = monthyear,
-                           y = mean_meanres,
-                           group = BoroName)) + 
-  geom_line(aes(color = BoroName)) + 
+                       aes(x = monthyear_date,
+                           y = mean_meanres)) + 
+  geom_line() + 
   theme_minimal()
 
-residuals_ts_boro_plot
+# Time series plot of sd residuals
+residuals_ts_boro_plot_sd <- ggplot(data = crashes_withresiduals_grouped,
+                       aes(x = monthyear_date,
+                           y = mean_sdres)) + 
+  geom_line() + 
+  theme_minimal()
+
+residuals_ts_boro_plot + residuals_ts_boro_plot_sd
 ```
 
-## COULD I RUN ANOTHER BYM2 MODEL TO DETERMINE HOW MUCH OF THE STDDEV VARIATION IS SPATIAL
+## Residuals by Geography
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# Creating the dataset
+crashes_withresiduals_grouped_geo <- crashes_withresiduals %>%
+  group_by(BoroCT2020) %>%
+  summarize(mean_meanres = mean(y_residuals_mean), 
+            mean_sdres = mean(y_residuals_sd),
+            .groups = "drop")
+
+# Mapping mean and sd residuals
+mean_residuals_map <- tm_shape(crashes_withresiduals_grouped_geo) + 
+  tm_polygons(fill = "mean_meanres",
+              fill.scale = tm_scale_intervals(values = "brewer.bu_gn",
+                                              style = "jenks",
+                                              midpoint = 0),
+              fill.legend = tm_legend(title = "Average Mean Residuals by Tract"),
+              lwd = 0.3) +
+  tm_layout(legend.outside = TRUE, 
+            legend.outside.position = "right")
+
+sd_residuals_map <- tm_shape(crashes_withresiduals_grouped_geo) + 
+  tm_polygons(fill = "mean_sdres",
+              fill.scale = tm_scale_intervals(values = "brewer.blues",
+                                              style = "jenks"),
+              fill.legend = tm_legend(title = "Average SD of Residuals by Tract"),
+              lwd = 0.3) +
+  tm_layout(legend.outside = TRUE, 
+            legend.outside.position = "right")
+
+tmap_arrange(mean_residuals_map,
+             sd_residuals_map,
+             nrow = 1, ncol = 2)
+```
+
+NOTE THAT IF MORE TIME AND COMPUTING POWER, I WOULD LOOK TO MODEL VARYING DISPERSION BY BOROUGH
+
+# Causal Inference via Difference-in-Difference
+
+## Modeling
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# The Stan Model
+did_model_1_file = file.path('stan', 'did_model_1.stan')
+cat(readLines(did_model_1_file), sep="\n")
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# Setting up input data
+nbs_adj <- nbs_to_adjlist(nyc_nbs_connected)
+
+design_matrix <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic,
+         cp_zone, after_cp) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+  
+N <- nrow(crashes_tracts_geo)
+y <- as.integer(crashes_tracts_geo$tot_crashes)
+E <- as.integer(crashes_tracts_geo$population)
+K <- ncol(design_matrix)
+xs <- design_matrix
+I <- length(unique(crashes_tracts_geo$tract_id))
+i_index <- crashes_tracts_geo$tract_id
+J <- length(unique(crashes_tracts_geo$time_id))
+j_index <- crashes_tracts_geo$time_id
+N_edges <- ncol(nbs_adj)
+neighbors <- nbs_adj
+tau <- get_scaling_factor(nyc_nbs_connected)
+did <- crashes_tracts_geo$treatment
+
+data_did_1 <- list(
+  N = N,
+  y = y,
+  E = E,
+  K = K,
+  xs = xs,
+  I = I,
+  J = J,
+  i_index = i_index,
+  j_index = j_index,
+  N_edges = N_edges,
+  neighbors = neighbors,
+  tau = tau,
+  did = did
+)
+
+did_model_1 <- cmdstan_model(did_model_1_file)
+set.seed(50)
+
+did_fit_1 <- did_model_1$sample(data=data_did_1, 
+                                  parallel_chains=cores, 
+                                  refresh=0)
+
+saveRDS(did_fit_1, file = "model-files/did_fit_1.rds")
+
+did_summary <- did_fit_1$summary()
+vars <- c('theta', 'beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma', 'rho', 'nb_disp')
+did_summary_subset <- did_summary[did_summary$variable %in% vars, ]
+numeric_cols <- sapply(did_summary_subset, is.numeric)
+did_summary_subset[numeric_cols] <- round(did_summary_subset[numeric_cols], 3)
+
+print(did_summary_subset)
+```
+
+
+
 
