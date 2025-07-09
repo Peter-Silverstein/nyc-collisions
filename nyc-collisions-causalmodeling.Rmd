@@ -1,5 +1,5 @@
 ---
-title: "Causal Analysis of the Effect of Congestion Pricing on Traffic Accidents in NYC"
+title: "Spatio-Temporal Modeling of Vehicle Collisions in NYC, with Difference-in-Difference for Causal Inference"
 author: "Peter Silverstein"
 date: "`r Sys.Date()`"
 output: 
@@ -31,16 +31,17 @@ source("helper-functions/utils_dataviz.R")
 source("helper-functions/utils_bym2.R")
 
 # For use in opening file and saving time
-# time_fit_1 <- readRDS("model-files/time_fit_1.rds")
-# time_fit_2 <- readRDS("model-files/time_fit_2.rds")
-# full_fit_1 <- readRDS("model-files/full_fit_1.rds")
+time_fit_1 <- readRDS("model-files/time_fit_1.rds")
+time_fit_2 <- readRDS("model-files/time_fit_2.rds")
+full_fit_1 <- readRDS("model-files/full_fit_1.rds")
+did_fit_1 <- readRDS("model-files/did_fit_1.rds")
 ```
 
 # Introduction
 
-This post is Part III of my project using Stan to model crash counts in New York City census tracts using the <a href="https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data"  target="_blank">Motor Vehicle Collisions - Crashes</a> dataset from NYC Open Data. The overarching goals of this project are to (a) improve my Stan modeling skill in a Bayesian workflow setting and (b) perform some causal inference to see if the <a href="https://congestionreliefzone.mta.info"  target="_blank">Congestion Relief Zone (CRZ)</a>, introduced in early 2025, impacted the number of collisions that occur in a census tract. In <a href="nyc-collisions-EDA.html"  target="_blank">Part I</a>, I performed exploratory data analysis through tables, visualizations, and tests for statistical clustering. In <a href="nyc-collisions-modeling.html"  target="_blank">Part II</a>, I modeled spatial correlation between crash counts in neighboring census tracts using a BYM2 model. Here, in Part III, I will extend the BYM2 model to include a time component, which means that my models will adjust for (a) unmeasured spatial variation, (b) unmeasured temporal variation, and (c) pre-treatment demographic and built-environment variables. This provides a good backbone for my eventual inclusion of a treatment indicator (whether the measurement was within the CRZ after congestion pricing was implemented), and an estimation of the treatment effect.
+This post is Part III of my project using Stan to model crash counts in New York City census tracts using the <a href="https://data.cityofnewyork.us/Public-Safety/Motor-Vehicle-Collisions-Crashes/h9gi-nx95/about_data"  target="_blank">Motor Vehicle Collisions - Crashes</a> dataset from NYC Open Data. The overarching goals of this project are to (a) improve my Stan modeling skill in a Bayesian workflow setting and (b) perform some causal inference to see if the <a href="https://congestionreliefzone.mta.info"  target="_blank">Congestion Relief Zone (CRZ)</a>, introduced in early 2025, impacted the number of collisions that occur in a census tract. In <a href="nyc-collisions-EDA.html"  target="_blank">Part I</a>, I performed exploratory data analysis through tables, visualizations, and tests for statistical clustering. In <a href="nyc-collisions-modeling.html"  target="_blank">Part II</a>, I modeled spatial correlation between crash counts in neighboring census tracts using a BYM2 model. Here, in Part III, I will extend the BYM2 model to include a time component, which means that my models will adjust for (a) unmeasured spatial variation, (b) unmeasured temporal variation, and (c) pre-treatment demographic and built-environment variables. This provides a good backbone for my eventual inclusion of a treatment indicator (whether the measurement was within the CRZ after congestion pricing was implemented), and an estimation of the treatment effect. This is essentially a Difference-in-Difference (DiD) approach.
 
-It is my intention to write a final post which presents the findings of this project in a concise manner. Knowing that the concise document is forthcoming, I can disregard concerns about length in this post and simply try to do good, transparent statistical modeling. In that vein, you can find the full GitHub repository for this project here: <a href="https://github.com/Peter-Silverstein/nyc-collisions"  target="_blank">https://github.com/Peter-Silverstein/nyc-collisions</a>.
+This post is not about brevity or beautiful presentation of my results, but rather about doing high-quality, super transparent statistics in a Bayesian setting. In that vein, you can find the full GitHub repository for this project here: <a href="https://github.com/Peter-Silverstein/nyc-collisions"  target="_blank">https://github.com/Peter-Silverstein/nyc-collisions</a>.
 
 A final note before I get into it: this is a personal passion project, my time is somewhat limited, and my computer has its limits. I think, with sophisticated Stan modeling, there's always another thing you can do. I want to get this done and posted, so my plan is to do quite a few of those things, find a good place to call the model decent, and interpret the results with that caveat.
 
@@ -243,7 +244,7 @@ cat(readLines(time_model_1_file), sep="\n")
 
 And here is the output:
 
-```{r class.source=NULL, message=FALSE, warning=FALSE}
+```{r eval=FALSE, message=FALSE, warning=FALSE, class.source=NULL}
 # Fitting the Model, Examining the Output
 
 # Setting up input data
@@ -281,12 +282,50 @@ time_fit_1 <- time_model_1$sample(data=data_time_1,
                                   parallel_chains=cores, 
                                   refresh=0)
 
-saveRDS(time_fit_1, file = "model-files/time_fit_1.rds")
-
-print(time_fit_1)
+time_fit_1$save_object("model-files/time_fit_1.rds")
 ```
 
-My rhat values are all very close to 1.01 (the ideal being 1.00, the gold standard being anything below 1.01, and the "it's fine" standard being anything below 1.1). To be honest, I'm not super fussed with the actual coefficient values 
+```{r message=FALSE, warning=FALSE, class.source=NULL}
+# Setting up input data
+design_matrix <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+  
+N <- nrow(crashes_tracts_geo)
+y <- as.integer(crashes_tracts_geo$tot_crashes)
+E <- as.integer(crashes_tracts_geo$population)
+K <- ncol(design_matrix)
+xs <- design_matrix
+I <- length(unique(crashes_tracts_geo$tract_id))
+i_index <- crashes_tracts_geo$tract_id
+J <- length(unique(crashes_tracts_geo$time_id))
+j_index <- crashes_tracts_geo$time_id
+
+data_time_1 <- list(
+  N = N,
+  y = y,
+  E = E,
+  K = K,
+  xs = xs,
+  I = I,
+  J = J,
+  i_index = i_index,
+  j_index = j_index
+)
+
+time_summary <- time_fit_1$summary()
+vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma', 'rho', 'nb_disp')
+time_summary_subset <- time_summary[time_summary$variable %in% vars, ]
+numeric_cols <- sapply(time_summary_subset, is.numeric)
+time_summary_subset[numeric_cols] <- round(time_summary_subset[numeric_cols], 3)
+
+print(time_summary_subset)
+```
+
+My rhat values are all very close to 1.01 (the ideal being 1.00, the gold standard being anything below 1.01, and the "it's fine" standard being anything below 1.1). To be honest, I'm not super fussed with the actual coefficient values at this stage--the goal is to set up a pretty good model that I can then add a DiD component to. For now, I'll proceed with posterior simulation checks. 
+
+First, I compare the 50% posterior interval created by the `generated quantities` block in my Stan code to the actual observed data. A truly well-specified model would return about 50% of observed data falling in the 50% intervals. For reference, the BYM2 models I created in Part II returned about 99% of observed data falling the the 50% intervals, which indicates that the model is overfit to the data and wouldn't handle additional new data well.
 
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Posterior Checks
@@ -294,10 +333,14 @@ y_rep_time <- as_draws_matrix(time_fit_1$draws("y_rep"))
 ppc_central_interval(y_rep_time, data_time_1$y)
 ```
 
+Look, I'm no statistician, so my assessment of this is (a) a bit of vibes and (b) based on what I can read on the internet. 70% isn't as bad as my previous models, but still not great. For further assessment, the chart below shows observed data (blue dots) and the predicted intervals for each of those blue dots (yellow lines).
+
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 ppc_y_yrep_overlay(y_rep_time, data_time_1$y,
                      'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
 ```
+
+Definitely the intervals are a bit wide, but it's also interesting that the intervals seem to be a bit high when the value of y is pretty low, and a bit low when the value of y is a bit high. I'll be honest, this was a major point of struggle for me through this whole process--I think it takes a lot of knowledge to see a pattern like this and have a corpus of ideas that I can try. As a relatively inexperienced modeler, seeing these patterns don't yet cause me to go: "oh sure I know what to do here!" One thing, though, is that this is a Poisson model, which assumes that mean equals variance in the outcome distributions. I'll check whether that assumption holds for these data.
 
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Check for Overdispersion
@@ -307,6 +350,8 @@ var_y <- var(data_time_1$y)
 cat("Mean:", mean_y, "Variance:", var_y, "Ratio:", var_y / mean_y, "\n")
 ```
 
+Ok! So there's an issue--the variance is much higher than the mean. As such, I need to update my model to separately estimate a dispersion parameter. Negative binomial it is!
+
 ## Time Series Negative Binomial Model
 
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
@@ -315,7 +360,7 @@ time_model_2_file = file.path('stan', 'poisson_time_2.stan')
 cat(readLines(time_model_2_file), sep="\n")
 ```
 
-```{r class.source=NULL, message=FALSE, warning=FALSE}
+```{r eval=FALSE, class.source=NULL, message=FALSE, warning=FALSE}
 # Fitting the Model, Examining the Output
 
 # Setting up input data
@@ -353,7 +398,37 @@ time_fit_2 <- time_model_2$sample(data=data_time_2,
                                   parallel_chains=cores, 
                                   refresh=0)
 
-saveRDS(time_fit_2, file = "model-files/time_fit_2.rds")
+time_fit_2$save_object("model-files/time_fit_2.rds")
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# Setting up input data
+design_matrix <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+  
+N <- nrow(crashes_tracts_geo)
+y <- as.integer(crashes_tracts_geo$tot_crashes)
+E <- as.integer(crashes_tracts_geo$population)
+K <- ncol(design_matrix)
+xs <- design_matrix
+I <- length(unique(crashes_tracts_geo$tract_id))
+i_index <- crashes_tracts_geo$tract_id
+J <- length(unique(crashes_tracts_geo$time_id))
+j_index <- crashes_tracts_geo$time_id
+
+data_time_2 <- list(
+  N = N,
+  y = y,
+  E = E,
+  K = K,
+  xs = xs,
+  I = I,
+  J = J,
+  i_index = i_index,
+  j_index = j_index
+)
 
 time_summary <- time_fit_2$summary()
 vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma', 'rho', 'nb_disp')
@@ -363,6 +438,8 @@ time_summary_subset[numeric_cols] <- round(time_summary_subset[numeric_cols], 3)
 
 print(time_summary_subset)
 ```
+
+Once again, the model seems to be converging pretty well--I'll perform posterior predictive checks.
 
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Posterior Checks
@@ -375,6 +452,8 @@ ppc_y_yrep_overlay(y_rep_time2, data_time_2$y,
                      'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
 ```
 
+Well...changing to the negative binomial didn't change this that much. I'm still going to keep the model as negative binomial because of the mean:variance ratio, but there's gotta be something else. One thing that came up in my online research is zero inflation (that is, there are more zeros in the real dataset than the model predicts). I'll check that by comparing the average number of zeros in my posterior draws against the true number of zeros in the observed outcome data.
+
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Check Zero Inflation
 n_zeros_obs <- sum(data_time_2$y == 0)
@@ -384,9 +463,13 @@ mean_pred_zeros <- mean(n_zeros_pred)
 print(paste("Actual N Zeros:", n_zeros_obs, "Mean Pred Zeros:", mean_pred_zeros))
 ```
 
+Nope! Not an issue. Ok--I'm just going to add the BYM2 spatial component to the model and see if that changes anything.
+
 # Combining BYM2 and Time Series Models
 
 ## Retrieving the Spatial Dependency Matrix
+
+This is a step I covered in Part II, but the BYM2 model requires that I feed the model some knowledge of the spatial structure in my data. The graph below is a visual representation of the links between neighbors.
 
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Get the spatial structure
@@ -462,6 +545,8 @@ spdep_map <- tm_shape(tracts_uniques) +
 spdep_map
 ```
 
+And there are some basic checks I can perform to make sure my setup worked properly.
+
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 cat('is symmetric? ', is.symmetric.nb(nyc_nbs_connected), '\n')
 summary(nyc_nbs_connected)
@@ -469,7 +554,11 @@ cat('nodes per component')
 table(n.comp.nb(nyc_nbs_connected)$comp.id)
 ```
 
+It's symmetric and there's just a single fully-connected component, so I'm good to go.
+
 ## Modeling
+
+So, this model combines the negative binomial time hierarchical model with the BYM2 model from Part II. The total variance and the proportion of variance from each source (time periods, spatial dependency, tract-level random effects) are captured within the 3-component simplex and then added to the negative binomial model.
 
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # The Stan Model
@@ -477,7 +566,7 @@ full_model_1_file = file.path('stan', 'full_model_1.stan')
 cat(readLines(full_model_1_file), sep="\n")
 ```
 
-```{r class.source=NULL, message=FALSE, warning=FALSE}
+```{r eval=FALSE, class.source=NULL, message=FALSE, warning=FALSE}
 # Setting up input data
 nbs_adj <- nbs_to_adjlist(nyc_nbs_connected)
 
@@ -521,7 +610,45 @@ full_fit_1 <- full_model_1$sample(data=data_full_1,
                                   parallel_chains=cores, 
                                   refresh=0)
 
-saveRDS(full_fit_1, file = "model-files/full_fit_1.rds")
+full_fit_1$save_object("model-files/full_fit_1.rds")
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# Setting up input data
+nbs_adj <- nbs_to_adjlist(nyc_nbs_connected)
+
+design_matrix <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+  
+N <- nrow(crashes_tracts_geo)
+y <- as.integer(crashes_tracts_geo$tot_crashes)
+E <- as.integer(crashes_tracts_geo$population)
+K <- ncol(design_matrix)
+xs <- design_matrix
+I <- length(unique(crashes_tracts_geo$tract_id))
+i_index <- crashes_tracts_geo$tract_id
+J <- length(unique(crashes_tracts_geo$time_id))
+j_index <- crashes_tracts_geo$time_id
+N_edges <- ncol(nbs_adj)
+neighbors <- nbs_adj
+tau <- get_scaling_factor(nyc_nbs_connected)
+
+data_full_1 <- list(
+  N = N,
+  y = y,
+  E = E,
+  K = K,
+  xs = xs,
+  I = I,
+  J = J,
+  i_index = i_index,
+  j_index = j_index,
+  N_edges = N_edges,
+  neighbors = neighbors,
+  tau = tau
+)
 
 full_summary <- full_fit_1$summary()
 vars <- c('beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma', 'rho', 'nb_disp')
@@ -532,21 +659,29 @@ full_summary_subset[numeric_cols] <- round(full_summary_subset[numeric_cols], 3)
 print(full_summary_subset)
 ```
 
+In the output above, it actually looks like the model is having a bit of trouble estimating sigma, the variance parameter associated with the combined simplex term. I will seek to address that in the next model by using a stronger prior.
+
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Posterior Checks
 y_rep_full <- as_draws_matrix(full_fit_1$draws("y_rep"))
 ppc_central_interval(y_rep_full, data_full_1$y)
 ```
 
+Unfortunately, you can see in the output above and the graph below that the addition of the BYM2 component to the model didn't do much in the way of improving the predictive aspect of the model. It's still useful in terms of accurately estimating the other parameters, but it seems as if we have a more structural issue with the model.
+
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 ppc_y_yrep_overlay(y_rep_full, data_full_1$y,
                      'Poisson model PPC\ny (blue dot) vs. y_rep (yellow 50% central interval, grey full extent)')
 ```
 
+As I mentioned at the top--my time and computing power is somewhat limited. Rather than spending ages and ages trying to perfect the model, I will seek to (a) figure out perhaps why this isn't working as well as I hoped and then (b) simply move on to the DiD.
 
 # Intensive Diagnostic Steps
 
 ## Visualizing a Sample of Draws
+
+One thing I wanted to do was take a random sample of posterior draws and plot their distributions of the outcome against the original sample. As you can see in the faceted chart below, it visually looks pretty darn close to the original sample. That's a sign that the use of the negative binomal distribution is good. 
+
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Visualizing a sample of draws
 mask <- sample(4000, 8)
@@ -573,6 +708,9 @@ density_check + facet_wrap(~index, ncol = 3)
 ```
 
 ## Residuals by Time Period
+
+Next, I decided to calculate average residuals and the standard deviation of residuals for each observation, join it back to the main dataset, and then plot these over time and space to see if that sheds some light on where the model is being inconsistent.
+
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
 # Dealing with y_rep
 y_actuals_full <- matrix(, nrow = 4000, ncol = length(y))
@@ -617,6 +755,8 @@ residuals_ts_boro_plot_sd <- ggplot(data = crashes_withresiduals_grouped,
 residuals_ts_boro_plot + residuals_ts_boro_plot_sd
 ```
 
+To my non-expert eye, the characteristics of the residuals don't look too strange when plotted by month. We do see a bit of a pattern where the mean and standard deviation of residuals is higher in the first half of 2024 compared to the first half of 2025. I suppose we can interpret these in raw counts, so the full range of the mean residuals is only about 0.15 crashes per tract, which seems like a pretty low value. The range of standard deviations is a bit bigger at 0.3 crashes. Perhaps geography will provide more insight.
+
 ## Residuals by Geography
 
 ```{r class.source=NULL, message=FALSE, warning=FALSE}
@@ -652,9 +792,14 @@ tmap_arrange(mean_residuals_map,
              nrow = 1, ncol = 2)
 ```
 
-NOTE THAT IF MORE TIME AND COMPUTING POWER, I WOULD LOOK TO MODEL VARYING DISPERSION BY BOROUGH
+In the above graphs, I'm not sure I see that clear of a pattern for mean residuals, but I do see some visual clustering for standard deviation of residuals--there seems to be systematically higher standard deviation of residuals in Manhattan and the Bronx compared to Brooklyn. This is actually a pretty interesting insight, and makes me want to perhaps allow varying dispersion parameters by some geography grouping. Transparently, I wrote a second version of the full model above that included varying dispersion by borough, but my laptop was really struggling through fitting the model and I gave up. So, before I move on to the DiD modeling, my next steps would be:
+
+1. Fit a couple of simple BYM2 and BYM2+Time Component models to the residuals to determine what degree of the variance in these models can be explained by spatial and temporal variation.
+2. Assuming the models confirm what I observe visually, I would fit the varying dispersion parameter by Borough and, though I think this might make my computer blow up, perhaps by time as well.
 
 # Causal Inference via Difference-in-Difference
+
+With the caveats of this post in mind, I'm just going to do the DiD because I'm impatient. Never having done a DiD before, I was surprised to learn how simple it is--I added 2 variables to my design matrix: a pre/post intervention indicator and an indicator for the CRZ. I then added an additional variable that's the interaction between the two, so tract measurements taken during or after January 2025 within the CRZ are considered "treated." The parameter Theta will be the treatment effect.
 
 ## Modeling
 
@@ -664,7 +809,7 @@ did_model_1_file = file.path('stan', 'did_model_1.stan')
 cat(readLines(did_model_1_file), sep="\n")
 ```
 
-```{r class.source=NULL, message=FALSE, warning=FALSE}
+```{r eval=FALSE, class.source=NULL, message=FALSE, warning=FALSE}
 # Setting up input data
 nbs_adj <- nbs_to_adjlist(nyc_nbs_connected)
 
@@ -711,7 +856,48 @@ did_fit_1 <- did_model_1$sample(data=data_did_1,
                                   parallel_chains=cores, 
                                   refresh=0)
 
-saveRDS(did_fit_1, file = "model-files/did_fit_1.rds")
+did_fit_1$save_object("model-files/did_fit_1.rds")
+```
+
+```{r class.source=NULL, message=FALSE, warning=FALSE}
+# Setting up input data
+nbs_adj <- nbs_to_adjlist(nyc_nbs_connected)
+
+design_matrix <- as.data.frame(crashes_tracts_geo) %>%
+  select(prop_pubtransit, median_income, median_age, frag_index, traffic,
+         cp_zone, after_cp) %>%
+  mutate(median_income = log(median_income),
+         traffic = log(traffic))
+  
+N <- nrow(crashes_tracts_geo)
+y <- as.integer(crashes_tracts_geo$tot_crashes)
+E <- as.integer(crashes_tracts_geo$population)
+K <- ncol(design_matrix)
+xs <- design_matrix
+I <- length(unique(crashes_tracts_geo$tract_id))
+i_index <- crashes_tracts_geo$tract_id
+J <- length(unique(crashes_tracts_geo$time_id))
+j_index <- crashes_tracts_geo$time_id
+N_edges <- ncol(nbs_adj)
+neighbors <- nbs_adj
+tau <- get_scaling_factor(nyc_nbs_connected)
+did <- crashes_tracts_geo$treatment
+
+data_did_1 <- list(
+  N = N,
+  y = y,
+  E = E,
+  K = K,
+  xs = xs,
+  I = I,
+  J = J,
+  i_index = i_index,
+  j_index = j_index,
+  N_edges = N_edges,
+  neighbors = neighbors,
+  tau = tau,
+  did = did
+)
 
 did_summary <- did_fit_1$summary()
 vars <- c('theta', 'beta_intercept', 'beta0', 'betas[1]', 'betas[2]', 'betas[3]', 'betas[4]', 'betas[5]', 'sigma', 'rho', 'nb_disp')
@@ -722,6 +908,8 @@ did_summary_subset[numeric_cols] <- round(did_summary_subset[numeric_cols], 3)
 print(did_summary_subset)
 ```
 
+The Theta coefficient can be interpreted on the log scale. The rule of thumb is that you can roughly convert this log to a percentage change associated with the indicator variable. That is, the median estimate of the treatment effect is that the congestion pricing zone reduced crashes by about 3%. But, of course, we can see that the 90% confidence interval associated with this parameter estimate crosses 0 so, by classic statistical inference, we cannot properly discern the effect from 0. This makes me wonder what we'd see with a full year's worth of CRZ data. One thing worth noting is that the stronger prior on sigma did improve the rhat a bit.
 
+I think that'll end this project for now. Honestly, my main takeaway is just how (a) fun and (b) intense a full Bayesian workflow is. This project, easily my most intense modeling experience to date, has left me feeling as if there is so much more I could have learned about model performance and so many more approaches I want to try to improve the model. I didn't even touch cross-validation in this process, and beyond varying dispersion parameters there's other approaches that came up in my research (such as nonlinear transformations).
 
-
+The other big takeaway I have is this. In classes with Andrew Gelman, he'd say something to the effect of: "this modeling approach (Stan) is a big pain in the ass, but it's worth it to be able to be this specific." I sort of understood it at the time, but this process has increased my understanding. Take the DiD, for example. It's an out-of-the-box sort of approach to causal inference, but an out-of-the-box solutions would have failed to appropriately model the spatial correlation within the data. Or a Durbin model (which I understand to be a model with varying coefficients and perhaps variance by spatial unit), which would have missed the time component and the causal inference part of the equation. Further, writing my own Stan code makes me understand what's in my model much better than plugging a dataset into an R wrapper function. 

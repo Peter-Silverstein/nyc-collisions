@@ -56,7 +56,7 @@ model {
   betas ~ std_normal();
   phi_1 ~ std_normal();
   phi_2 ~ std_normal();
-  sigma ~ normal(0, 5);
+  sigma ~ std_normal();
   rho ~ dirichlet(rep_vector(2, 3));
   nb_disp ~ exponential(1);
   target += -0.5 * dot_self(phi_3[neighbors[1]] - phi_3[neighbors[2]]); // ICAR prior
